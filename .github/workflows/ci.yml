@@ -65,8 +65,15 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Setup Emacs
+      - name: Setup Emacs (Unix)
+        if: runner.os != 'Windows'
         uses: purcell/setup-emacs@master
+        with:
+          version: 29.4
+
+      - name: Setup Emacs (Windows)
+        if: runner.os == 'Windows'
+        uses: jcs090218/setup-emacs@master
         with:
           version: 29.4
 
