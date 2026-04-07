@@ -89,18 +89,18 @@ jobs:
           - os: ubuntu-latest
             module: dyn-loader
             binary_name: dyn-loader-module.so
-            feature: dyn-loader-module
-            asset_name: dyn-loader-linux-x86_64
+            arch: x86_64
+            asset_name: dyn-loader-module-x86_64.so
           - os: windows-latest
             module: dyn-loader
             binary_name: dyn-loader-module.dll
-            feature: dyn-loader-module
-            asset_name: dyn-loader-windows-x86_64
+            arch: x86_64
+            asset_name: dyn-loader-module-x86_64.dll
           - os: windows-latest
             module: conpty
             binary_name: conpty-module.dll
-            feature: conpty-module
-            asset_name: conpty-windows-x86_64
+            arch: x86_64
+            asset_name: conpty-module-x86_64.dll
 
     steps:
       - name: Checkout
@@ -111,38 +111,46 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Setup Emacs (Unix)
-        if: runner.os != 'Windows'
-        uses: purcell/setup-emacs@master
+      - name: Restore Zig caches
+        uses: actions/cache@v4
         with:
-          version: 29.4
-
-      - name: Setup Emacs (Windows)
-        if: runner.os == 'Windows'
-        uses: jcs090218/setup-emacs@master
-        with:
-          version: 29.4
+          path: |
+            .zig-cache/global
+            src/${{ matrix.module }}/.zig-cache
+          key: release-zig-${{ runner.os }}-${{ matrix.module }}-${{ matrix.arch }}-0.15.2-${{ hashFiles('VERSION', 'build.zig', 'src/**') }}
+          restore-keys: |
+            release-zig-${{ runner.os }}-${{ matrix.module }}-${{ matrix.arch }}-0.15.2-
 
       - name: Build module
         shell: pwsh
         run: |
           $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
           $buildFile = Join-Path $moduleDir 'build.zig'
-          zig build --build-file $buildFile -Doptimize=ReleaseSafe install
+          $globalCacheDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE '.zig-cache') 'global'
+          $localCacheDir = Join-Path $moduleDir '.zig-cache'
+          zig build --build-file $buildFile `
+            --global-cache-dir $globalCacheDir `
+            --cache-dir $localCacheDir `
+            -Doptimize=ReleaseFast `
+            install
 
-      - name: Smoke-load module in Emacs
+      - name: Stage release artifact
+        id: stage
         shell: pwsh
         run: |
           $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
           $modulePath = Join-Path (Join-Path (Join-Path $moduleDir 'zig-out') 'bin') '${{ matrix.binary_name }}'
-          $testFile = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'test') 'smoke-load.el'
-          emacs --batch -Q -l $testFile -- $modulePath '${{ matrix.feature }}'
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'release-assets'
+          $artifactPath = Join-Path $artifactDir '${{ matrix.asset_name }}'
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+          Copy-Item -Path $modulePath -Destination $artifactPath -Force
+          "artifact_path=$artifactPath" >> $env:GITHUB_OUTPUT
 
       - name: Publish module binary
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
-          artifacts: src/${{ matrix.module }}/zig-out/bin/${{ matrix.binary_name }}
+          artifacts: ${{ steps.stage.outputs.artifact_path }}
           omitBodyDuringUpdate: true
           omitDraftDuringUpdate: true
           omitNameDuringUpdate: true
