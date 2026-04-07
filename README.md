@@ -43,3 +43,8 @@ common build entrypoints, and top-level release documentation.
 
 Release artifacts are produced per module, with the root build remaining the
 single entrypoint for local validation and multi-module release automation.
+
+The release base version lives in `VERSION`. Published release versions use the
+format `<base>.<run_number>.<sha7>`, with tags created as
+`v<base>.<run_number>.<sha7>`. Release assets are uploaded directly as raw
+module binaries (`.so` / `.dll`) per build matrix entry.
