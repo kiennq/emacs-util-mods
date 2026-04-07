@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  zig-tests:
+    name: Zig tests (${{ matrix.module }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            module: dyn-loader
+          - os: windows-latest
+            module: dyn-loader
+          - os: windows-latest
+            module: conpty
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Run Zig tests
+        shell: pwsh
+        run: |
+          $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
+          $buildFile = Join-Path $moduleDir 'build.zig'
+          zig build --build-file $buildFile -Doptimize=ReleaseSafe test
+
+  smoke-load:
+    name: ${{ matrix.module }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            module: dyn-loader
+            binary_name: dyn-loader-module.so
+            feature: dyn-loader-module
+          - os: windows-latest
+            module: dyn-loader
+            binary_name: dyn-loader-module.dll
+            feature: dyn-loader-module
+          - os: windows-latest
+            module: conpty
+            binary_name: conpty-module.dll
+            feature: conpty-module
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Setup Emacs
+        uses: purcell/setup-emacs@master
+        with:
+          version: 29.4
+
+      - name: Build module
+        shell: pwsh
+        run: |
+          $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
+          $buildFile = Join-Path $moduleDir 'build.zig'
+          zig build --build-file $buildFile -Doptimize=ReleaseSafe install
+
+      - name: Smoke-load module in Emacs
+        shell: pwsh
+        run: |
+          $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
+          $modulePath = Join-Path (Join-Path (Join-Path $moduleDir 'zig-out') 'bin') '${{ matrix.binary_name }}'
+          $testFile = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'test') 'smoke-load.el'
+          emacs --batch -Q -l $testFile -- $modulePath '${{ matrix.feature }}'

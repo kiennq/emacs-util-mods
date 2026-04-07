@@ -9,9 +9,14 @@
 
 # Built distribution
 dist/
+zig-out/
 
 # Backup files
 *~
 
 # Undo-tree save-files
 *.~undo-tree
+
+# Zig
+.zig-cache/
+zig-cache/
