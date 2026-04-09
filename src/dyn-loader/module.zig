@@ -48,7 +48,23 @@ fn forwardGenericExport(raw_env: ?*c.emacs_env, nargs: isize, args: [*c]c.emacs_
         return env.nil();
     };
     const binding: *const state.ExportBinding = @ptrCast(@alignCast(raw_binding));
+    _ = currentFunctionExport(binding.module, binding.export_id) orelse {
+        env.signalError("dyn-loader: stale or invalid function binding");
+        return env.nil();
+    };
     return binding.module.generic_manifest.invoke(binding.export_id, raw_env, nargs, args, null);
+}
+
+fn currentFunctionExport(module: *const state.ModuleRecord, export_id: u32) ?*const abi.ExportDescriptor {
+    for (module.generic_manifest.exports[0..module.generic_manifest.exports_len]) |*descriptor| {
+        if (descriptor.export_id == export_id) {
+            return if (descriptor.kind == @intFromEnum(abi.ExportKind.function))
+                descriptor
+            else
+                null;
+        }
+    }
+    return null;
 }
 
 fn clearInstalledTrampoline(env: emacs.Env, function_symbol: c.emacs_value) void {
