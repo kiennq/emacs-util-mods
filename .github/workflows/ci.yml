@@ -84,7 +84,31 @@ jobs:
           $buildFile = Join-Path $moduleDir 'build.zig'
           zig build --build-file $buildFile -Doptimize=ReleaseSafe install
 
+      - name: Build dyn-loader fixtures
+        if: matrix.module == 'dyn-loader'
+        shell: pwsh
+        run: |
+          $fixtureDir = Join-Path $env:RUNNER_TEMP 'dyn-loader-fixtures'
+          $script = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'test') 'build-dyn-loader-fixtures.ps1'
+          & $script -OutputDir $fixtureDir
+
+      - name: Verify dyn-loader lifecycle in Emacs
+        if: matrix.module == 'dyn-loader'
+        shell: pwsh
+        run: |
+          $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
+          $modulePath = Join-Path (Join-Path (Join-Path $moduleDir 'zig-out') 'bin') '${{ matrix.binary_name }}'
+          $fixtureDir = Join-Path $env:RUNNER_TEMP 'dyn-loader-fixtures'
+          $extension = [System.IO.Path]::GetExtension($modulePath)
+          $manifestPath = Join-Path $fixtureDir 'fixture-manifest.json'
+          $livePath = Join-Path $fixtureDir "fixture-live$extension"
+          $v2Path = Join-Path $fixtureDir "fixture-v2$extension"
+          $v3Path = Join-Path $fixtureDir "fixture-v3$extension"
+          $testFile = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'test') 'dyn-loader-lifecycle.el'
+          emacs --batch -Q -l $testFile -- $modulePath $manifestPath $livePath $v2Path $v3Path
+
       - name: Smoke-load module in Emacs
+        if: matrix.module != 'dyn-loader'
         shell: pwsh
         run: |
           $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
