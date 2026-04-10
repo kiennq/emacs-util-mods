@@ -55,7 +55,7 @@ pub fn init(
     rows: u16,
     cols: u16,
     working_directory: []const u8,
-    process_environment: emacs.Value,
+    environment_overrides: emacs.Value,
     allocator: std.mem.Allocator,
 ) !*State {
     if (!is_windows) return error.UnsupportedPlatform;
@@ -73,7 +73,7 @@ pub fn init(
     try createConpty(state, rows, cols);
     errdefer deinit(state);
 
-    try spawnShell(state, env, shell_command, working_directory, process_environment, allocator);
+    try spawnShell(state, env, shell_command, working_directory, environment_overrides, allocator);
 
     state.reader_thread = c.CreateThread(
         null,
@@ -269,7 +269,7 @@ fn spawnShell(
     env: emacs.Env,
     shell_command: []const u8,
     working_directory: []const u8,
-    process_environment: emacs.Value,
+    environment_overrides: emacs.Value,
     allocator: std.mem.Allocator,
 ) !void {
     const command_line = try std.unicode.utf8ToUtf16LeAllocZ(allocator, shell_command);
@@ -278,7 +278,7 @@ fn spawnShell(
     const cwd = try std.unicode.utf8ToUtf16LeAllocZ(allocator, working_directory);
     defer allocator.free(cwd);
 
-    const env_block = try buildEnvironmentBlock(allocator, env, process_environment);
+    const env_block = try buildEnvironmentBlock(allocator, env, environment_overrides);
     defer if (env_block) |blk| allocator.free(blk);
 
     var attr_list_size: usize = 0;
@@ -331,10 +331,10 @@ fn spawnShell(
 fn buildEnvironmentBlock(allocator: std.mem.Allocator, env: emacs.Env, list: emacs.Value) !?[]u16 {
     if (!is_windows) return null;
 
-    var items = std.ArrayList([]const u8).empty;
+    var overrides = std.ArrayList([:0]u16).empty;
     defer {
-        for (items.items) |item| allocator.free(item);
-        items.deinit(allocator);
+        for (overrides.items) |item| allocator.free(item);
+        overrides.deinit(allocator);
     }
 
     var iter = list;
@@ -344,22 +344,80 @@ fn buildEnvironmentBlock(allocator: std.mem.Allocator, env: emacs.Env, list: ema
         const item = env.call1(car, iter);
         const item_utf8 = env.extractStringAlloc(item, allocator) orelse
             return error.InvalidEnvironmentEntry;
-        try items.append(allocator, item_utf8);
+        defer allocator.free(item_utf8);
+        try overrides.append(allocator, try std.unicode.utf8ToUtf16LeAllocZ(allocator, item_utf8));
         iter = env.call1(cdr, iter);
     }
-    return try buildEnvironmentBlockUtf8(allocator, items.items);
+    if (overrides.items.len == 0) return null;
+
+    var base_entries = std.ArrayList([]const u16).empty;
+    defer {
+        for (base_entries.items) |entry| allocator.free(entry);
+        base_entries.deinit(allocator);
+    }
+    const os_env = c.GetEnvironmentStringsW();
+    if (os_env != null) {
+        defer _ = c.FreeEnvironmentStringsW(os_env);
+
+        var cursor = os_env.?;
+        while (cursor[0] != 0) {
+            const entry = std.mem.sliceTo(cursor, 0);
+            try base_entries.append(allocator, try allocator.dupe(u16, entry));
+            cursor += entry.len + 1;
+        }
+    }
+
+    return try buildEnvironmentBlockFromEntries(allocator, base_entries.items, overrides.items);
 }
 
-fn buildEnvironmentBlockUtf8(allocator: std.mem.Allocator, items: []const []const u8) !?[]u16 {
-    if (items.len == 0) return null;
+fn environmentKeyLen(entry: []const u16) usize {
+    return std.mem.indexOfScalar(u16, entry, '=') orelse entry.len;
+}
+
+fn lowerAscii(unit: u16) u16 {
+    return switch (unit) {
+        'A'...'Z' => unit + ('a' - 'A'),
+        else => unit,
+    };
+}
+
+fn environmentKeyMatches(entry: []const u16, override: []const u16) bool {
+    const entry_len = environmentKeyLen(entry);
+    const override_len = environmentKeyLen(override);
+    if (entry_len != override_len) return false;
+
+    for (entry[0..entry_len], override[0..override_len]) |lhs, rhs| {
+        if (lowerAscii(lhs) != lowerAscii(rhs)) return false;
+    }
+    return true;
+}
+
+fn buildEnvironmentBlockFromEntries(
+    allocator: std.mem.Allocator,
+    base_entries: []const []const u16,
+    overrides: []const [:0]const u16,
+) !?[]u16 {
+    if (overrides.len == 0) return null;
 
     var builder = std.ArrayList(u16).empty;
     errdefer builder.deinit(allocator);
 
-    for (items) |item| {
-        const item_utf16 = try std.unicode.utf8ToUtf16LeAllocZ(allocator, item);
-        defer allocator.free(item_utf16);
-        try builder.appendSlice(allocator, item_utf16);
+    for (base_entries) |entry| {
+        var overridden = false;
+        for (overrides) |override| {
+            if (environmentKeyMatches(entry, override[0..override.len])) {
+                overridden = true;
+                break;
+            }
+        }
+        if (!overridden) {
+            try builder.appendSlice(allocator, entry);
+            try builder.append(allocator, 0);
+        }
+    }
+
+    for (overrides) |override| {
+        try builder.appendSlice(allocator, override[0..override.len]);
         try builder.append(allocator, 0);
     }
     try builder.append(allocator, 0);
@@ -409,21 +467,34 @@ fn notify(fd: c_int) void {
     _ = c._write(fd, &signal, signal.len);
 }
 
-test "buildEnvironmentBlockUtf8 appends a double-null terminator" {
-    const items = [_][]const u8{ "TERM=xterm-256color", "FOO=bar" };
-    const block = (try buildEnvironmentBlockUtf8(std.testing.allocator, &items)).?;
+test "buildEnvironmentBlockFromEntries preserves base entries and overrides matching keys" {
+    const base_path = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "PATH=os");
+    defer std.testing.allocator.free(base_path);
+    const base_home = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "HOME=/tmp");
+    defer std.testing.allocator.free(base_home);
+    const override_path = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "PATH=override");
+    defer std.testing.allocator.free(override_path);
+    const override_term = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "TERM=xterm");
+    defer std.testing.allocator.free(override_term);
+
+    const base_entries = [_][]const u16{ base_path, base_home };
+    const overrides = [_][:0]const u16{ override_path, override_term };
+    const block = (try buildEnvironmentBlockFromEntries(std.testing.allocator, &base_entries, &overrides)).?;
     defer std.testing.allocator.free(block);
 
     const expected = [_]u16{
-        'T', 'E', 'R', 'M', '=', 'x', 't', 'e', 'r', 'm', '-', '2', '5', '6', 'c', 'o', 'l', 'o', 'r', 0,
-        'F', 'O', 'O', '=', 'b', 'a', 'r', 0,   0,
+        'H', 'O', 'M', 'E', '=', '/', 't', 'm', 'p', 0,
+        'P', 'A', 'T', 'H', '=', 'o', 'v', 'e', 'r', 'r', 'i', 'd', 'e', 0,
+        'T', 'E', 'R', 'M', '=', 'x', 't', 'e', 'r', 'm', 0,
+        0,
     };
     try std.testing.expectEqualSlices(u16, &expected, block);
 }
 
-test "buildEnvironmentBlockUtf8 returns null for an empty environment list" {
-    const items = [_][]const u8{};
-    try std.testing.expectEqual(@as(?[]u16, null), try buildEnvironmentBlockUtf8(std.testing.allocator, &items));
+test "buildEnvironmentBlockFromEntries returns null for an empty override list" {
+    const base_entries = [_][]const u16{};
+    const overrides = [_][:0]const u16{};
+    try std.testing.expectEqual(@as(?[]u16, null), try buildEnvironmentBlockFromEntries(std.testing.allocator, &base_entries, &overrides));
 }
 
 fn testSleepThread(_: ?*anyopaque) callconv(.winapi) c.DWORD {

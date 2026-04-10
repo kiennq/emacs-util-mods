@@ -141,7 +141,7 @@ export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int
     const raw_env = runtime.get_environment.?(runtime);
     const env = emacs.Env.init(raw_env);
 
-    env.bindFunction("conpty--init", 7, 7, &fnConptyInit, "Start a Windows ConPTY backend.\n\n(conpty--init TERM PROCESS COMMAND ROWS COLS CWD ENV)");
+    env.bindFunction("conpty--init", 7, 7, &fnConptyInit, "Start a Windows ConPTY backend.\n\n(conpty--init TERM PROCESS COMMAND ROWS COLS CWD ENV-OVERRIDES)");
     env.bindFunction("conpty--is-alive", 1, 1, &fnConptyIsAlive, "Return t if the Windows ConPTY child is alive.\n\n(conpty--is-alive TERM)");
     env.bindFunction("conpty--kill", 1, 1, &fnConptyKill, "Terminate the Windows ConPTY child.\n\n(conpty--kill TERM)");
     env.bindFunction("conpty--read-pending", 1, 1, &fnConptyReadPending, "Read pending Windows ConPTY output.\n\n(conpty--read-pending TERM)");
