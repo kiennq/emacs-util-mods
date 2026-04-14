@@ -20,7 +20,10 @@ pub const Library = struct {
             return .{ .handle = @ptrCast(handle) };
         }
 
-        const handle = posix.dlopen(path.ptr, posix.RTLD_NOW | posix.RTLD_LOCAL) orelse
+        // dlopen requires a null-terminated C string.
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
+        const handle = posix.dlopen(path_z.ptr, posix.RTLD_NOW | posix.RTLD_LOCAL) orelse
             return error.OpenLibraryFailed;
         return .{ .handle = handle };
     }
