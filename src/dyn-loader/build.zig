@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("emacs.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = strip_binaries,
         .link_libc = true,
     });
     emacs_mod.addSystemIncludePath(emacs_include);
