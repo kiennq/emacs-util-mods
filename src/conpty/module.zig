@@ -11,7 +11,7 @@ const version: [:0]const u8 = "0.1";
 
 export const plugin_is_GPL_compatible: c_int = 1;
 
-var registry = Registry.init(std.heap.c_allocator);
+var registry = Registry.init(std.heap.page_allocator);
 
 fn termKey(env: emacs.Env, value: emacs.Value) ?usize {
     const raw_ptr = env.raw.get_user_ptr.?(env.raw, value) orelse return null;
@@ -38,7 +38,7 @@ fn fnConptyInit(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
         return env.nil();
     };
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -95,7 +95,7 @@ fn fnConptyWrite(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?
     const key = termKey(env, args[0]) orelse return env.nil();
     const state = get(key) orelse return env.nil();
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 

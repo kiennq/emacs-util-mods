@@ -31,6 +31,7 @@ const OUTPUT_BUFFER_SIZE = 64 * 1024;
 const PENDING_BUFFER_SIZE = 4 * 1024 * 1024;
 
 pub const State = if (is_windows) struct {
+    arena: std.heap.ArenaAllocator,
     hpc: HPCON = null,
     pty_input: c.HANDLE = c.INVALID_HANDLE_VALUE,
     pty_output: c.HANDLE = c.INVALID_HANDLE_VALUE,
@@ -38,8 +39,8 @@ pub const State = if (is_windows) struct {
     reader_thread: c.HANDLE = c.INVALID_HANDLE_VALUE,
     notify_fd: c_int = -1,
     pending_lock: c.CRITICAL_SECTION = undefined,
-    output_buf: [2][OUTPUT_BUFFER_SIZE]u8 = undefined,
-    pending_buf: [PENDING_BUFFER_SIZE]u8 = undefined,
+    output_buf: *[2][OUTPUT_BUFFER_SIZE]u8,
+    pending_buf: *[PENDING_BUFFER_SIZE]u8,
     pending_len: usize = 0,
     running: std.atomic.Value(u8) = std.atomic.Value(u8).init(1),
 } else struct {};
@@ -61,9 +62,25 @@ pub fn init(
     if (!is_windows) return error.UnsupportedPlatform;
     if (!(try initApi())) return error.MissingConpty;
 
-    const state = try std.heap.c_allocator.create(State);
-    errdefer std.heap.c_allocator.destroy(state);
-    state.* = .{};
+    const state = try std.heap.page_allocator.create(State);
+    errdefer std.heap.page_allocator.destroy(state);
+
+    state.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer state.arena.deinit();
+
+    const arena_alloc = state.arena.allocator();
+    state.output_buf = try arena_alloc.create([2][OUTPUT_BUFFER_SIZE]u8);
+    state.pending_buf = try arena_alloc.create([PENDING_BUFFER_SIZE]u8);
+
+    state.hpc = null;
+    state.pty_input = c.INVALID_HANDLE_VALUE;
+    state.pty_output = c.INVALID_HANDLE_VALUE;
+    state.shell_process = c.INVALID_HANDLE_VALUE;
+    state.reader_thread = c.INVALID_HANDLE_VALUE;
+    state.notify_fd = -1;
+    state.pending_len = 0;
+    state.running = std.atomic.Value(u8).init(1);
+
     c.InitializeCriticalSection(&state.pending_lock);
     errdefer c.DeleteCriticalSection(&state.pending_lock);
 
@@ -158,7 +175,8 @@ fn finalizeState(state: *State) void {
     }
 
     c.DeleteCriticalSection(&state.pending_lock);
-    std.heap.c_allocator.destroy(state);
+    state.arena.deinit();
+    std.heap.page_allocator.destroy(state);
 }
 
 fn cleanupThread(param: ?*anyopaque) callconv(.winapi) c.DWORD {
@@ -283,8 +301,8 @@ fn spawnShell(
 
     var attr_list_size: usize = 0;
     _ = c.InitializeProcThreadAttributeList(null, 1, 0, &attr_list_size);
-    const attr_list_buf = try std.heap.c_allocator.alloc(u8, attr_list_size);
-    defer std.heap.c_allocator.free(attr_list_buf);
+    const attr_list_buf = try allocator.alloc(u8, attr_list_size);
+    defer allocator.free(attr_list_buf);
 
     var si = std.mem.zeroes(c.STARTUPINFOEXW);
     si.StartupInfo.cb = @sizeOf(c.STARTUPINFOEXW);
@@ -484,9 +502,9 @@ test "buildEnvironmentBlockFromEntries preserves base entries and overrides matc
 
     const expected = [_]u16{
         'H', 'O', 'M', 'E', '=', '/', 't', 'm', 'p', 0,
-        'P', 'A', 'T', 'H', '=', 'o', 'v', 'e', 'r', 'r', 'i', 'd', 'e', 0,
-        'T', 'E', 'R', 'M', '=', 'x', 't', 'e', 'r', 'm', 0,
-        0,
+        'P', 'A', 'T', 'H', '=', 'o', 'v', 'e', 'r', 'r',
+        'i', 'd', 'e', 0,   'T', 'E', 'R', 'M', '=', 'x',
+        't', 'e', 'r', 'm', 0,   0,
     };
     try std.testing.expectEqualSlices(u16, &expected, block);
 }
@@ -495,6 +513,11 @@ test "buildEnvironmentBlockFromEntries returns null for an empty override list" 
     const base_entries = [_][]const u16{};
     const overrides = [_][:0]const u16{};
     try std.testing.expectEqual(@as(?[]u16, null), try buildEnvironmentBlockFromEntries(std.testing.allocator, &base_entries, &overrides));
+}
+
+test "State keeps large buffers off-struct" {
+    if (!is_windows) return;
+    try std.testing.expect(@sizeOf(State) < 4096);
 }
 
 fn testSleepThread(_: ?*anyopaque) callconv(.winapi) c.DWORD {
@@ -514,8 +537,18 @@ test "deinit returns without waiting for the reader thread" {
         null,
     ) orelse return error.CreateThreadFailed;
 
-    const state = try std.heap.c_allocator.create(State);
-    state.* = .{};
+    const state = try std.heap.page_allocator.create(State);
+    state.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const arena_alloc = state.arena.allocator();
+    state.output_buf = try arena_alloc.create([2][OUTPUT_BUFFER_SIZE]u8);
+    state.pending_buf = try arena_alloc.create([PENDING_BUFFER_SIZE]u8);
+    state.hpc = null;
+    state.pty_input = c.INVALID_HANDLE_VALUE;
+    state.pty_output = c.INVALID_HANDLE_VALUE;
+    state.shell_process = c.INVALID_HANDLE_VALUE;
+    state.notify_fd = -1;
+    state.pending_len = 0;
+    state.running = std.atomic.Value(u8).init(1);
     c.InitializeCriticalSection(&state.pending_lock);
     state.reader_thread = reader_thread;
 
