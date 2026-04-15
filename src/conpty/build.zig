@@ -32,6 +32,14 @@ pub fn build(b: *std.Build) void {
     });
     emacs_mod.addSystemIncludePath(emacs_include);
 
+    const dyn_loader_abi_mod = b.createModule(.{
+        .root_source_file = b.path("../dyn-loader/abi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    dyn_loader_abi_mod.addImport("emacs", emacs_mod);
+
     const conpty_mod = b.createModule(.{
         .root_source_file = b.path("module.zig"),
         .target = target,
@@ -41,6 +49,7 @@ pub fn build(b: *std.Build) void {
     });
     addModuleIncludes(conpty_mod, emacs_include);
     conpty_mod.addImport("emacs", emacs_mod);
+    conpty_mod.addImport("dyn_loader_abi", dyn_loader_abi_mod);
 
     const conpty_lib = b.addLibrary(.{
         .name = "conpty-module",
@@ -64,6 +73,7 @@ pub fn build(b: *std.Build) void {
     });
     addModuleIncludes(conpty_check_mod, emacs_include);
     conpty_check_mod.addImport("emacs", emacs_mod);
+    conpty_check_mod.addImport("dyn_loader_abi", dyn_loader_abi_mod);
 
     const conpty_check_obj = b.addObject(.{
         .name = "conpty-module-check",

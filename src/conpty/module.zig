@@ -1,9 +1,13 @@
 const std = @import("std");
 const emacs = @import("emacs");
 const Conpty = @import("conpty.zig");
+const loader = @import("dyn_loader_abi");
 
 const c = emacs.c;
 const Registry = std.AutoHashMap(usize, *Conpty.State);
+
+const id: [:0]const u8 = "conpty-module";
+const version: [:0]const u8 = "0.1";
 
 export const plugin_is_GPL_compatible: c_int = 1;
 
@@ -135,18 +139,112 @@ fn fnConptyKill(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
     return if (killed) env.t() else env.nil();
 }
 
+// ---------------------------------------------------------------------------
+// Dual-mode export infrastructure
+// ---------------------------------------------------------------------------
+
+const ExportId = enum(u32) {
+    init_backend = 1,
+    read_pending = 2,
+    write = 3,
+    resize = 4,
+    is_alive = 5,
+    kill = 6,
+};
+
+pub const conpty_export_descriptors = [_]loader.ExportDescriptor{
+    .{ .export_id = @intFromEnum(ExportId.init_backend), .kind = @intFromEnum(loader.ExportKind.function), .lisp_name = "conpty--init", .min_arity = 7, .max_arity = 7, .docstring = "Start a Windows ConPTY backend.\n\n(conpty--init TERM PROCESS COMMAND ROWS COLS CWD ENV-OVERRIDES)", .flags = 0 },
+    .{ .export_id = @intFromEnum(ExportId.read_pending), .kind = @intFromEnum(loader.ExportKind.function), .lisp_name = "conpty--read-pending", .min_arity = 1, .max_arity = 1, .docstring = "Read pending Windows ConPTY output.\n\n(conpty--read-pending TERM)", .flags = 0 },
+    .{ .export_id = @intFromEnum(ExportId.write), .kind = @intFromEnum(loader.ExportKind.function), .lisp_name = "conpty--write", .min_arity = 2, .max_arity = 2, .docstring = "Write raw bytes to the Windows ConPTY backend.\n\n(conpty--write TERM DATA)", .flags = 0 },
+    .{ .export_id = @intFromEnum(ExportId.resize), .kind = @intFromEnum(loader.ExportKind.function), .lisp_name = "conpty--resize", .min_arity = 3, .max_arity = 3, .docstring = "Resize the Windows ConPTY backend.\n\n(conpty--resize TERM ROWS COLS)", .flags = 0 },
+    .{ .export_id = @intFromEnum(ExportId.is_alive), .kind = @intFromEnum(loader.ExportKind.function), .lisp_name = "conpty--is-alive", .min_arity = 1, .max_arity = 1, .docstring = "Return t if the Windows ConPTY child is alive.\n\n(conpty--is-alive TERM)", .flags = 0 },
+    .{ .export_id = @intFromEnum(ExportId.kill), .kind = @intFromEnum(loader.ExportKind.function), .lisp_name = "conpty--kill", .min_arity = 1, .max_arity = 1, .docstring = "Terminate the Windows ConPTY child.\n\n(conpty--kill TERM)", .flags = 0 },
+};
+
+pub fn invokeExport(export_id: u32, raw_env: ?*c.emacs_env, nargs: isize, args: [*c]c.emacs_value, data: ?*anyopaque) callconv(.c) c.emacs_value {
+    return switch (@as(ExportId, @enumFromInt(export_id))) {
+        .init_backend => fnConptyInit(raw_env, nargs, args, data),
+        .read_pending => fnConptyReadPending(raw_env, nargs, args, data),
+        .write => fnConptyWrite(raw_env, nargs, args, data),
+        .resize => fnConptyResize(raw_env, nargs, args, data),
+        .is_alive => fnConptyIsAlive(raw_env, nargs, args, data),
+        .kill => fnConptyKill(raw_env, nargs, args, data),
+    };
+}
+
+pub fn getVariable(export_id: u32, raw_env: ?*c.emacs_env, _: ?*anyopaque) callconv(.c) c.emacs_value {
+    _ = export_id;
+    const env = emacs.Env.init(raw_env.?);
+    env.signalError("conpty: variable export not supported");
+    return env.nil();
+}
+
+pub fn setVariable(export_id: u32, raw_env: ?*c.emacs_env, _: c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
+    _ = export_id;
+    const env = emacs.Env.init(raw_env.?);
+    env.signalError("conpty: variable export not supported");
+    return env.nil();
+}
+
+export fn loader_module_init_generic(out: *loader.GenericManifest) callconv(.c) void {
+    out.* = .{
+        .loader_abi = loader.LoaderAbiVersion,
+        .module_id = id.ptr,
+        .module_version = version.ptr,
+        .exports_len = conpty_export_descriptors.len,
+        .exports = conpty_export_descriptors[0..].ptr,
+        .invoke = &invokeExport,
+        .get_variable = &getVariable,
+        .set_variable = &setVariable,
+    };
+}
+
+fn bindExportDescriptor(env: emacs.Env, descriptor: *const loader.ExportDescriptor) void {
+    switch (descriptor.kind) {
+        @intFromEnum(loader.ExportKind.function) => {
+            const function = env.makeFunction(
+                descriptor.min_arity,
+                descriptor.max_arity,
+                &invokeExportDescriptor,
+                descriptor.docstring,
+                @ptrCast(@constCast(descriptor)),
+            );
+            _ = env.call2(env.intern("fset"), env.intern(descriptor.lisp_name), function);
+        },
+        @intFromEnum(loader.ExportKind.variable) => {
+            const value = getVariable(
+                descriptor.export_id,
+                env.raw,
+                @ptrCast(@constCast(descriptor)),
+            );
+            _ = env.call2(env.intern("set"), env.intern(descriptor.lisp_name), value);
+        },
+        else => unreachable,
+    }
+}
+
+fn invokeExportDescriptor(
+    raw_env: ?*c.emacs_env,
+    nargs: isize,
+    args: [*c]c.emacs_value,
+    data: ?*anyopaque,
+) callconv(.c) c.emacs_value {
+    const env = emacs.Env.init(raw_env.?);
+    const raw_descriptor = data orelse {
+        env.signalError("conpty: missing export descriptor");
+        return env.nil();
+    };
+    const descriptor: *const loader.ExportDescriptor = @ptrCast(@alignCast(raw_descriptor));
+    return invokeExport(descriptor.export_id, raw_env, nargs, args, null);
+}
+
 export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int {
     if (runtime.size < @sizeOf(c.struct_emacs_runtime)) return 1;
 
-    const raw_env = runtime.get_environment.?(runtime);
-    const env = emacs.Env.init(raw_env);
-
-    env.bindFunction("conpty--init", 7, 7, &fnConptyInit, "Start a Windows ConPTY backend.\n\n(conpty--init TERM PROCESS COMMAND ROWS COLS CWD ENV-OVERRIDES)");
-    env.bindFunction("conpty--is-alive", 1, 1, &fnConptyIsAlive, "Return t if the Windows ConPTY child is alive.\n\n(conpty--is-alive TERM)");
-    env.bindFunction("conpty--kill", 1, 1, &fnConptyKill, "Terminate the Windows ConPTY child.\n\n(conpty--kill TERM)");
-    env.bindFunction("conpty--read-pending", 1, 1, &fnConptyReadPending, "Read pending Windows ConPTY output.\n\n(conpty--read-pending TERM)");
-    env.bindFunction("conpty--resize", 3, 3, &fnConptyResize, "Resize the Windows ConPTY backend.\n\n(conpty--resize TERM ROWS COLS)");
-    env.bindFunction("conpty--write", 2, 2, &fnConptyWrite, "Write raw bytes to the Windows ConPTY backend.\n\n(conpty--write TERM DATA)");
+    const env = emacs.Env.init(runtime.get_environment.?(runtime));
+    for (&conpty_export_descriptors) |*descriptor| {
+        bindExportDescriptor(env, descriptor);
+    }
 
     emacs.initSymbols(env);
     env.provide("conpty-module");
