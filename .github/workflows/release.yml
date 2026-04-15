@@ -146,6 +146,16 @@ jobs:
           Copy-Item -Path $modulePath -Destination $artifactPath -Force
           "artifact_path=$artifactPath" >> $env:GITHUB_OUTPUT
 
+      - name: Strip release binary
+        shell: pwsh
+        run: |
+          $artifact = '${{ steps.stage.outputs.artifact_path }}'
+          if ($IsLinux) {
+            strip --strip-all $artifact
+          } else {
+            llvm-strip --strip-all $artifact
+          }
+
       - name: Publish module binary
         uses: ncipollo/release-action@v1
         with:
