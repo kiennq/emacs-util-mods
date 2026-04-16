@@ -148,7 +148,14 @@ pub const ModuleSlot = struct {
 
 var loaded_modules: std.StringHashMapUnmanaged(*ModuleSlot) = .{};
 var loaded_module_order: std.ArrayListUnmanaged(*ModuleSlot) = .{};
+var module_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+// Tracks the allocator used to populate the registry collections so they
+// can be properly deinited (necessary when tests use std.testing.allocator).
 var registry_allocator: ?std.mem.Allocator = null;
+
+pub fn moduleAllocator() std.mem.Allocator {
+    return module_arena.allocator();
+}
 
 fn cleanupLoadPath(load_path: []const u8, target_path: []const u8) void {
     if (load_path.len == 0 or std.mem.eql(u8, load_path, target_path)) return;
@@ -285,9 +292,12 @@ pub fn functionHandle(
 
 pub fn reset() void {
     for (loaded_module_order.items) |module| module.deinit();
-    const allocator = registry_allocator orelse std.heap.page_allocator;
-    loaded_modules.deinit(allocator);
-    loaded_module_order.deinit(allocator);
+    if (registry_allocator) |alloc| {
+        loaded_modules.deinit(alloc);
+        loaded_module_order.deinit(alloc);
+    }
+    module_arena.deinit();
+    module_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     loaded_modules = .{};
     loaded_module_order = .{};
     registry_allocator = null;
