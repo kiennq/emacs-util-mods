@@ -285,7 +285,7 @@ pub fn functionHandle(
 
 pub fn reset() void {
     for (loaded_module_order.items) |module| module.deinit();
-    const allocator = registry_allocator orelse std.heap.c_allocator;
+    const allocator = registry_allocator orelse std.heap.page_allocator;
     loaded_modules.deinit(allocator);
     loaded_module_order.deinit(allocator);
     loaded_modules = .{};

@@ -208,14 +208,14 @@ fn parseLoaderManifest(
 }
 
 fn loadManifest(env: emacs.Env, manifest_path: []const u8) ?*state.ModuleSlot {
-    const parsed = parseLoaderManifest(std.heap.c_allocator, manifest_path) catch |err| {
+    const parsed = parseLoaderManifest(std.heap.page_allocator, manifest_path) catch |err| {
         signalValidationError(env, "dyn-loader: failed to read loader manifest: {s}", .{@errorName(err)});
         return null;
     };
-    defer std.heap.c_allocator.free(parsed.target_path);
+    defer std.heap.page_allocator.free(parsed.target_path);
 
     var candidate = state.openCandidate(
-        std.heap.c_allocator,
+        std.heap.page_allocator,
         manifest_path,
         parsed.target_path,
         parsed.loader_abi,
