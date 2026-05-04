@@ -63,10 +63,12 @@ pub fn init(
     if (!(try initApi())) return error.MissingConpty;
 
     const state = try std.heap.page_allocator.create(State);
-    errdefer std.heap.page_allocator.destroy(state);
+    var state_owned_by_init = true;
+    errdefer if (state_owned_by_init) std.heap.page_allocator.destroy(state);
 
     state.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    errdefer state.arena.deinit();
+    var arena_owned_by_init = true;
+    errdefer if (arena_owned_by_init) state.arena.deinit();
 
     const arena_alloc = state.arena.allocator();
     state.output_buf = try arena_alloc.create([2][OUTPUT_BUFFER_SIZE]u8);
@@ -82,12 +84,22 @@ pub fn init(
     state.running = std.atomic.Value(u8).init(1);
 
     c.InitializeCriticalSection(&state.pending_lock);
-    errdefer c.DeleteCriticalSection(&state.pending_lock);
+    var pending_lock_initialized = true;
+    errdefer if (pending_lock_initialized) c.DeleteCriticalSection(&state.pending_lock);
 
     state.notify_fd = env.openChannel(process);
     if (state.notify_fd < 0) return error.OpenChannelFailed;
+    var notify_fd_owned_by_init = true;
+    errdefer if (notify_fd_owned_by_init) {
+        _ = c._close(state.notify_fd);
+        state.notify_fd = -1;
+    };
 
     try createConpty(state, rows, cols);
+    state_owned_by_init = false;
+    arena_owned_by_init = false;
+    pending_lock_initialized = false;
+    notify_fd_owned_by_init = false;
     errdefer deinit(state);
 
     try spawnShell(state, env, shell_command, working_directory, environment_overrides, allocator);
@@ -392,6 +404,10 @@ fn environmentKeyLen(entry: []const u16) usize {
     return std.mem.indexOfScalar(u16, entry, '=') orelse entry.len;
 }
 
+fn environmentEntryHasValue(entry: []const u16) bool {
+    return std.mem.indexOfScalar(u16, entry, '=') != null;
+}
+
 fn lowerAscii(unit: u16) u16 {
     return switch (unit) {
         'A'...'Z' => unit + ('a' - 'A'),
@@ -435,6 +451,7 @@ fn buildEnvironmentBlockFromEntries(
     }
 
     for (overrides) |override| {
+        if (!environmentEntryHasValue(override[0..override.len])) continue;
         try builder.appendSlice(allocator, override[0..override.len]);
         try builder.append(allocator, 0);
     }
@@ -505,6 +522,31 @@ test "buildEnvironmentBlockFromEntries preserves base entries and overrides matc
         'P', 'A', 'T', 'H', '=', 'o', 'v', 'e', 'r', 'r',
         'i', 'd', 'e', 0,   'T', 'E', 'R', 'M', '=', 'x',
         't', 'e', 'r', 'm', 0,   0,
+    };
+    try std.testing.expectEqualSlices(u16, &expected, block);
+}
+
+test "buildEnvironmentBlockFromEntries treats bare overrides as unsets" {
+    const base_path = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "PATH=os");
+    defer std.testing.allocator.free(base_path);
+    const base_prompt = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "PROMPT_COMMAND=old");
+    defer std.testing.allocator.free(base_prompt);
+    const base_home = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "HOME=/tmp");
+    defer std.testing.allocator.free(base_home);
+    const override_path = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "PATH=override");
+    defer std.testing.allocator.free(override_path);
+    const unset_prompt = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "PROMPT_COMMAND");
+    defer std.testing.allocator.free(unset_prompt);
+
+    const base_entries = [_][]const u16{ base_path, base_prompt, base_home };
+    const overrides = [_][:0]const u16{ override_path, unset_prompt };
+    const block = (try buildEnvironmentBlockFromEntries(std.testing.allocator, &base_entries, &overrides)).?;
+    defer std.testing.allocator.free(block);
+
+    const expected = [_]u16{
+        'H', 'O', 'M', 'E', '=', '/', 't', 'm', 'p', 0,
+        'P', 'A', 'T', 'H', '=', 'o', 'v', 'e', 'r', 'r',
+        'i', 'd', 'e', 0,   0,
     };
     try std.testing.expectEqualSlices(u16, &expected, block);
 }

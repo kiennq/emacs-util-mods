@@ -69,8 +69,14 @@ fn fnConptyInit(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
         cwd.?,
         args[6],
         allocator,
-    ) catch {
-        env.signalError("conpty: failed to initialize backend");
+    ) catch |err| {
+        var msg_buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &msg_buf,
+            "conpty: failed to initialize backend: {s}",
+            .{@errorName(err)},
+        ) catch "conpty: failed to initialize backend";
+        env.signalError(msg);
         return env.nil();
     };
     errdefer Conpty.deinit(state);
