@@ -122,33 +122,21 @@ pub fn deinit(state_opt: ?*State) void {
 
     requestShutdown(state);
 
-    if (state.reader_thread != c.INVALID_HANDLE_VALUE) {
-        const cleanup_thread = c.CreateThread(
-            null,
-            0,
-            cleanupThread,
-            state,
-            0,
-            null,
-        );
-        if (cleanup_thread != null) {
-            _ = c.CloseHandle(cleanup_thread);
-            return;
-        }
+    if (state.reader_thread == c.INVALID_HANDLE_VALUE) {
+        finalizeState(state);
+        return;
     }
 
-    if (waitForReaderThread(state, c.INFINITE)) {
-        finalizeState(state);
-    }
-}
-
-pub fn deinitSync(state_opt: ?*State) void {
-    if (!is_windows) return;
-    const state = state_opt orelse return;
-
-    requestShutdown(state);
-    if (waitForReaderThread(state, c.INFINITE)) {
-        finalizeState(state);
+    const cleanup_thread = c.CreateThread(
+        null,
+        0,
+        cleanupThread,
+        state,
+        0,
+        null,
+    );
+    if (cleanup_thread != null) {
+        _ = c.CloseHandle(cleanup_thread);
     }
 }
 
@@ -537,6 +525,12 @@ test "buildEnvironmentBlockFromEntries preserves base entries and overrides matc
         't', 'e', 'r', 'm', 0,   0,
     };
     try std.testing.expectEqualSlices(u16, &expected, block);
+}
+
+test "module cleanup paths use fire-and-forget teardown" {
+    const source = @embedFile("module.zig");
+    try std.testing.expect(std.mem.indexOf(u8, source, "Conpty.deinitSync") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "Conpty.deinit(") != null);
 }
 
 test "buildEnvironmentBlockFromEntries treats bare overrides as unsets" {
