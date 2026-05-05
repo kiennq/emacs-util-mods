@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("abi.zig");
 const dynlib = @import("dynlib.zig");
+const emacs = @import("emacs");
 
 pub const ExportState = struct {
     export_id: u32,
@@ -60,7 +61,7 @@ pub const LiveModuleState = struct {
             .library = candidate.library,
             .generic_manifest = candidate.generic_manifest,
         };
-        errdefer live_state.deinit(allocator);
+        errdefer live_state.deinit(allocator, null);
 
         try live_state.rebuildExportsByName(allocator);
 
@@ -87,7 +88,8 @@ pub const LiveModuleState = struct {
         }
     }
 
-    fn deinit(self: *LiveModuleState, allocator: std.mem.Allocator) void {
+    fn deinit(self: *LiveModuleState, allocator: std.mem.Allocator, raw_env: ?*emacs.c.emacs_env) void {
+        if (self.generic_manifest.cleanup) |cleanup| cleanup(raw_env);
         if (self.library) |*library| library.close();
         cleanupLoadPath(self.load_path, self.target_path);
         self.deinitExportsByName(allocator);
@@ -119,16 +121,16 @@ pub const ModuleSlot = struct {
         return self.live_state != null;
     }
 
-    pub fn unload(self: *ModuleSlot) void {
+    pub fn unload(self: *ModuleSlot, raw_env: ?*emacs.c.emacs_env) void {
         if (self.live_state) |*live_state| {
-            live_state.deinit(self.allocator);
+            live_state.deinit(self.allocator, raw_env);
             self.live_state = null;
         }
     }
 
-    fn replace(self: *ModuleSlot, candidate: *CandidateModule) !void {
+    fn replace(self: *ModuleSlot, candidate: *CandidateModule, raw_env: ?*emacs.c.emacs_env) !void {
         const next_live_state = try LiveModuleState.init(self.allocator, candidate);
-        self.unload();
+        self.unload(raw_env);
         self.live_state = next_live_state;
 
         self.allocator.free(self.manifest_path);
@@ -137,7 +139,7 @@ pub const ModuleSlot = struct {
     }
 
     fn deinit(self: *ModuleSlot) void {
-        self.unload();
+        self.unload(null);
         self.allocator.free(self.module_id);
         self.allocator.free(self.manifest_path);
         for (self.bindings.items) |binding| binding.deinit();
@@ -230,12 +232,12 @@ pub fn openCandidate(
     };
 }
 
-pub fn installCandidate(candidate: *CandidateModule) !*ModuleSlot {
+pub fn installCandidate(candidate: *CandidateModule, raw_env: ?*emacs.c.emacs_env) !*ModuleSlot {
     if (registry_allocator == null) registry_allocator = candidate.allocator;
 
     const module_id = std.mem.span(candidate.generic_manifest.module_id);
     if (loaded_modules.get(module_id)) |module| {
-        try module.replace(candidate);
+        try module.replace(candidate, raw_env);
         return module;
     }
 
@@ -318,8 +320,7 @@ fn testBuildReloadFixture(
 ) !void {
     const source_path = try std.fmt.allocPrint(allocator, "{s}.zig", .{output_path});
     defer allocator.free(source_path);
-    const source = try std.fmt.allocPrint(
-        allocator,
+    const source = try std.fmt.allocPrint(allocator,
         \\const GenericManifest = extern struct {{
         \\    loader_abi: u32,
         \\    module_id: [*:0]const u8,
@@ -329,6 +330,7 @@ fn testBuildReloadFixture(
         \\    invoke: ?*const anyopaque,
         \\    get_variable: ?*const anyopaque,
         \\    set_variable: ?*const anyopaque,
+        \\    cleanup: ?*const anyopaque,
         \\}};
         \\
         \\export fn loader_module_init_generic(manifest: *GenericManifest) callconv(.c) void {{
@@ -341,6 +343,7 @@ fn testBuildReloadFixture(
         \\        .invoke = null,
         \\        .get_variable = null,
         \\        .set_variable = null,
+        \\        .cleanup = null,
         \\    }};
         \\}}
         \\
@@ -392,6 +395,7 @@ test "installCandidate stores module by module id" {
             .invoke = undefined,
             .get_variable = undefined,
             .set_variable = undefined,
+            .cleanup = null,
         },
         .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
         .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
@@ -400,7 +404,7 @@ test "installCandidate stores module by module id" {
     };
     defer reset();
 
-    const module = try installCandidate(&candidate);
+    const module = try installCandidate(&candidate, null);
 
     try std.testing.expectEqualStrings("sample-module", module.module_id);
     try std.testing.expectEqualStrings("C:/ghostel/ghostel-module.json", module.manifest_path);
@@ -432,6 +436,7 @@ test "installCandidate replaces existing module live state for reload" {
             .invoke = undefined,
             .get_variable = undefined,
             .set_variable = undefined,
+            .cleanup = null,
         },
         .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
         .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
@@ -439,7 +444,7 @@ test "installCandidate replaces existing module live state for reload" {
         .loader_abi = 1,
     };
     defer reset();
-    const module = try installCandidate(&first);
+    const module = try installCandidate(&first, null);
 
     var second = CandidateModule{
         .allocator = std.testing.allocator,
@@ -453,18 +458,112 @@ test "installCandidate replaces existing module live state for reload" {
             .invoke = undefined,
             .get_variable = undefined,
             .set_variable = undefined,
+            .cleanup = null,
         },
         .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module-next.json"),
         .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll"),
         .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll.load"),
         .loader_abi = 1,
     };
-    const reloaded = try installCandidate(&second);
+    const reloaded = try installCandidate(&second, null);
 
     try std.testing.expectEqual(module, reloaded);
     try std.testing.expectEqualStrings("C:/ghostel/ghostel-module-next.json", reloaded.manifest_path);
     try std.testing.expectEqualStrings("C:/ghostel/sample-module-next.dll", reloaded.live_state.?.target_path);
     try std.testing.expectEqualStrings("1.1", std.mem.span(reloaded.live_state.?.generic_manifest.module_version));
+}
+
+var cleanup_test_events: std.ArrayListUnmanaged(u8) = .{};
+
+fn recordCleanup(_: ?*emacs.c.emacs_env) callconv(.c) void {
+    cleanup_test_events.append(std.testing.allocator, 'c') catch unreachable;
+}
+
+test "module cleanup hook runs on unload and before replacement" {
+    cleanup_test_events = .{};
+    defer cleanup_test_events.deinit(std.testing.allocator);
+
+    const exports = [_]abi.ExportDescriptor{
+        .{
+            .export_id = 1,
+            .kind = @intFromEnum(abi.ExportKind.function),
+            .lisp_name = "sample--ping",
+            .min_arity = 0,
+            .max_arity = 0,
+            .docstring = "Ping sample module.",
+            .flags = 0,
+        },
+    };
+    var first = CandidateModule{
+        .allocator = std.testing.allocator,
+        .library = null,
+        .generic_manifest = .{
+            .loader_abi = abi.LoaderAbiVersion,
+            .module_id = "sample-module",
+            .module_version = "1.0",
+            .exports_len = exports.len,
+            .exports = exports[0..].ptr,
+            .invoke = undefined,
+            .get_variable = undefined,
+            .set_variable = undefined,
+            .cleanup = &recordCleanup,
+        },
+        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
+        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .loader_abi = 1,
+    };
+    defer reset();
+    const module = try installCandidate(&first, null);
+
+    var second = CandidateModule{
+        .allocator = std.testing.allocator,
+        .library = null,
+        .generic_manifest = .{
+            .loader_abi = abi.LoaderAbiVersion,
+            .module_id = "sample-module",
+            .module_version = "1.1",
+            .exports_len = exports.len,
+            .exports = exports[0..].ptr,
+            .invoke = undefined,
+            .get_variable = undefined,
+            .set_variable = undefined,
+            .cleanup = null,
+        },
+        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module-next.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll"),
+        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll.load"),
+        .loader_abi = 1,
+    };
+    _ = try installCandidate(&second, null);
+    try std.testing.expectEqualStrings("c", cleanup_test_events.items);
+
+    module.unload(null);
+    try std.testing.expectEqualStrings("c", cleanup_test_events.items);
+
+    var third = CandidateModule{
+        .allocator = std.testing.allocator,
+        .library = null,
+        .generic_manifest = .{
+            .loader_abi = abi.LoaderAbiVersion,
+            .module_id = "sample-module",
+            .module_version = "1.2",
+            .exports_len = exports.len,
+            .exports = exports[0..].ptr,
+            .invoke = undefined,
+            .get_variable = undefined,
+            .set_variable = undefined,
+            .cleanup = &recordCleanup,
+        },
+        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module-third.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-third.dll"),
+        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-third.dll.load"),
+        .loader_abi = 1,
+    };
+    _ = try installCandidate(&third, null);
+
+    module.unload(null);
+    try std.testing.expectEqualStrings("cc", cleanup_test_events.items);
 }
 
 test "module slot unload preserves stable identity and manifest path" {
@@ -491,6 +590,7 @@ test "module slot unload preserves stable identity and manifest path" {
             .invoke = undefined,
             .get_variable = undefined,
             .set_variable = undefined,
+            .cleanup = null,
         },
         .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
         .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
@@ -499,10 +599,10 @@ test "module slot unload preserves stable identity and manifest path" {
     };
     defer reset();
 
-    const module = try installCandidate(&candidate);
+    const module = try installCandidate(&candidate, null);
     const binding = try functionHandle(module, "sample--ping", 0, 0);
 
-    module.unload();
+    module.unload(null);
 
     try std.testing.expectEqual(module, moduleForId("sample-module").?);
     try std.testing.expectEqualStrings("sample-module", module.module_id);
@@ -536,6 +636,7 @@ test "installCandidate reuses an unloaded module slot" {
             .invoke = undefined,
             .get_variable = undefined,
             .set_variable = undefined,
+            .cleanup = null,
         },
         .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
         .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
@@ -544,8 +645,8 @@ test "installCandidate reuses an unloaded module slot" {
     };
     defer reset();
 
-    const module = try installCandidate(&first);
-    module.unload();
+    const module = try installCandidate(&first, null);
+    module.unload(null);
 
     var second = CandidateModule{
         .allocator = std.testing.allocator,
@@ -559,6 +660,7 @@ test "installCandidate reuses an unloaded module slot" {
             .invoke = undefined,
             .get_variable = undefined,
             .set_variable = undefined,
+            .cleanup = null,
         },
         .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module-next.json"),
         .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll"),
@@ -566,7 +668,7 @@ test "installCandidate reuses an unloaded module slot" {
         .loader_abi = 1,
     };
 
-    const reloaded = try installCandidate(&second);
+    const reloaded = try installCandidate(&second, null);
 
     try std.testing.expectEqual(module, reloaded);
     try std.testing.expect(reloaded.isLoaded());
@@ -598,6 +700,7 @@ test "functionHandle reuses stable callback data for the same Lisp export contra
             .invoke = undefined,
             .get_variable = undefined,
             .set_variable = undefined,
+            .cleanup = null,
         },
         .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
         .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
@@ -606,7 +709,7 @@ test "functionHandle reuses stable callback data for the same Lisp export contra
     };
     defer reset();
 
-    const module = try installCandidate(&candidate);
+    const module = try installCandidate(&candidate, null);
     const first = try functionHandle(module, "sample--ping", 0, 0);
     const second = try functionHandle(module, "sample--ping", 0, 0);
 
@@ -639,6 +742,7 @@ test "functionHandle keeps incompatible arity contracts distinct" {
             .invoke = undefined,
             .get_variable = undefined,
             .set_variable = undefined,
+            .cleanup = null,
         },
         .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
         .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
@@ -647,7 +751,7 @@ test "functionHandle keeps incompatible arity contracts distinct" {
     };
     defer reset();
 
-    const module = try installCandidate(&candidate);
+    const module = try installCandidate(&candidate, null);
     const first = try functionHandle(module, "sample--ping", 0, 0);
     const second = try functionHandle(module, "sample--ping", 1, 1);
 
@@ -674,7 +778,7 @@ test "openCandidate sees updated module contents when target path is replaced" {
     try std.fs.copyFileAbsolute(first_output, live_output, .{});
 
     var first = try openCandidate(allocator, "sample-module.json", live_output, abi.LoaderAbiVersion);
-    const installed = try installCandidate(&first);
+    const installed = try installCandidate(&first, null);
     try std.testing.expectEqualStrings("1.0", std.mem.span(installed.live_state.?.generic_manifest.module_version));
 
     tmp_dir.dir.deleteFile("sample-live.old") catch |err| switch (err) {

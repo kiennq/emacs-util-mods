@@ -31,6 +31,7 @@ const c = @cImport({
 const DispatchFn = *const fn (u32, ?*c.emacs_env, isize, [*c]c.emacs_value, ?*anyopaque) callconv(.c) c.emacs_value;
 const VariableGetFn = *const fn (u32, ?*c.emacs_env, ?*anyopaque) callconv(.c) c.emacs_value;
 const VariableSetFn = *const fn (u32, ?*c.emacs_env, c.emacs_value, ?*anyopaque) callconv(.c) c.emacs_value;
+const CleanupFn = *const fn (?*c.emacs_env) callconv(.c) void;
 
 const ExportDescriptor = extern struct {
     export_id: u32,
@@ -51,6 +52,7 @@ const GenericManifest = extern struct {
     invoke: DispatchFn,
     get_variable: VariableGetFn,
     set_variable: VariableSetFn,
+    cleanup: ?CleanupFn,
 };
 
 const ExportKind = enum(u32) {
@@ -126,6 +128,7 @@ export fn loader_module_init_generic(manifest: *GenericManifest) callconv(.c) vo
         .invoke = &fixtureInvoke,
         .get_variable = &fixtureGetVariable,
         .set_variable = &fixtureSetVariable,
+        .cleanup = null,
     };
 }
 '@

@@ -141,6 +141,15 @@ pub fn deinit(state_opt: ?*State) void {
     finalizeState(state);
 }
 
+pub fn deinitSync(state_opt: ?*State) void {
+    if (!is_windows) return;
+    const state = state_opt orelse return;
+
+    requestShutdown(state);
+    waitForReaderThread(state, c.INFINITE);
+    finalizeState(state);
+}
+
 fn requestShutdown(state: *State) void {
     state.running.store(0, .release);
 

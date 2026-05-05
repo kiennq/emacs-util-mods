@@ -31,6 +31,14 @@ fn remove(term_key: usize) ?*Conpty.State {
     return entry.value;
 }
 
+fn cleanupModule(_: ?*c.emacs_env) callconv(.c) void {
+    var iterator = registry.valueIterator();
+    while (iterator.next()) |state| {
+        Conpty.deinitSync(state.*);
+    }
+    registry.clearRetainingCapacity();
+}
+
 fn fnConptyInit(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
     const env = emacs.Env.init(raw_env.?);
     const key = termKey(env, args[0]) orelse {
@@ -57,7 +65,7 @@ fn fnConptyInit(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
     }
 
     if (remove(key)) |existing| {
-        Conpty.deinit(existing);
+        Conpty.deinitSync(existing);
     }
 
     const state = Conpty.init(
@@ -79,7 +87,7 @@ fn fnConptyInit(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
         env.signalError(msg);
         return env.nil();
     };
-    errdefer Conpty.deinit(state);
+    errdefer Conpty.deinitSync(state);
 
     put(key, state) catch {
         env.signalError("conpty: failed to register backend state");
@@ -141,7 +149,7 @@ fn fnConptyKill(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
     const key = termKey(env, args[0]) orelse return env.nil();
     const state = remove(key) orelse return env.nil();
     const killed = Conpty.kill(state);
-    Conpty.deinit(state);
+    Conpty.deinitSync(state);
     return if (killed) env.t() else env.nil();
 }
 
@@ -202,6 +210,7 @@ export fn loader_module_init_generic(out: *loader.GenericManifest) callconv(.c) 
         .invoke = &invokeExport,
         .get_variable = &getVariable,
         .set_variable = &setVariable,
+        .cleanup = &cleanupModule,
     };
 }
 

@@ -238,7 +238,7 @@ fn loadManifest(env: emacs.Env, manifest_path: []const u8) ?*state.ModuleSlot {
         return null;
     };
 
-    const module = state.installCandidate(&candidate) catch |err| {
+    const module = state.installCandidate(&candidate, env.raw) catch |err| {
         signalValidationError(env, "dyn-loader: failed to install target module: {s}", .{@errorName(err)});
         return null;
     };
@@ -291,7 +291,7 @@ fn fnLoaderUnload(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: 
         return env.nil();
     };
 
-    module.unload();
+    module.unload(env.raw);
     updateLoadedModulesVariable(env);
     return env.t();
 }
@@ -349,6 +349,7 @@ test "validateGenericManifest accepts function exports" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
+        .cleanup = null,
     };
     try validateGenericManifest(&manifest, abi.LoaderAbiVersion);
 }
@@ -374,6 +375,7 @@ test "validateGenericManifest rejects missing module id" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
+        .cleanup = null,
     };
     try std.testing.expectError(error.MissingModuleId, validateGenericManifest(&manifest, abi.LoaderAbiVersion));
 }
@@ -399,6 +401,7 @@ test "validateGenericManifest rejects unknown export kinds" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
+        .cleanup = null,
     };
     try std.testing.expectError(error.InvalidExportKind, validateGenericManifest(&manifest, abi.LoaderAbiVersion));
 }
@@ -433,6 +436,7 @@ test "validateGenericManifest rejects duplicate export names" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
+        .cleanup = null,
     };
 
     try std.testing.expectError(error.DuplicateExportName, validateGenericManifest(&manifest, abi.LoaderAbiVersion));
