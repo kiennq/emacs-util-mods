@@ -224,7 +224,7 @@ fn loadManifest(env: emacs.Env, manifest_path: []const u8) ?*state.ModuleSlot {
         signalValidationError(env, "dyn-loader: failed to open target module: {s}", .{@errorName(err)});
         return null;
     };
-    defer candidate.deinit();
+    defer candidate.deinit(env.raw);
 
     validateGenericManifest(&candidate.generic_manifest, parsed.loader_abi) catch |err| {
         switch (err) {
@@ -349,7 +349,6 @@ test "validateGenericManifest accepts function exports" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
-        .cleanup = null,
     };
     try validateGenericManifest(&manifest, abi.LoaderAbiVersion);
 }
@@ -375,7 +374,6 @@ test "validateGenericManifest rejects missing module id" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
-        .cleanup = null,
     };
     try std.testing.expectError(error.MissingModuleId, validateGenericManifest(&manifest, abi.LoaderAbiVersion));
 }
@@ -401,7 +399,6 @@ test "validateGenericManifest rejects unknown export kinds" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
-        .cleanup = null,
     };
     try std.testing.expectError(error.InvalidExportKind, validateGenericManifest(&manifest, abi.LoaderAbiVersion));
 }
@@ -436,7 +433,6 @@ test "validateGenericManifest rejects duplicate export names" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
-        .cleanup = null,
     };
 
     try std.testing.expectError(error.DuplicateExportName, validateGenericManifest(&manifest, abi.LoaderAbiVersion));

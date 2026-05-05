@@ -210,8 +210,11 @@ export fn loader_module_init_generic(out: *loader.GenericManifest) callconv(.c) 
         .invoke = &invokeExport,
         .get_variable = &getVariable,
         .set_variable = &setVariable,
-        .cleanup = &cleanupModule,
     };
+}
+
+export fn loader_module_cleanup(raw_env: ?*c.emacs_env) callconv(.c) void {
+    cleanupModule(raw_env);
 }
 
 fn bindExportDescriptor(env: emacs.Env, descriptor: *const loader.ExportDescriptor) void {

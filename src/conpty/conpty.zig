@@ -137,8 +137,9 @@ pub fn deinit(state_opt: ?*State) void {
         }
     }
 
-    waitForReaderThread(state, c.INFINITE);
-    finalizeState(state);
+    if (waitForReaderThread(state, c.INFINITE)) {
+        finalizeState(state);
+    }
 }
 
 pub fn deinitSync(state_opt: ?*State) void {
@@ -146,8 +147,9 @@ pub fn deinitSync(state_opt: ?*State) void {
     const state = state_opt orelse return;
 
     requestShutdown(state);
-    waitForReaderThread(state, c.INFINITE);
-    finalizeState(state);
+    if (waitForReaderThread(state, c.INFINITE)) {
+        finalizeState(state);
+    }
 }
 
 fn requestShutdown(state: *State) void {
@@ -182,11 +184,12 @@ fn requestShutdown(state: *State) void {
     }
 }
 
-fn waitForReaderThread(state: *State, timeout_ms: c.DWORD) void {
-    if (state.reader_thread == c.INVALID_HANDLE_VALUE) return;
-    _ = c.WaitForSingleObject(state.reader_thread, timeout_ms);
+fn waitForReaderThread(state: *State, timeout_ms: c.DWORD) bool {
+    if (state.reader_thread == c.INVALID_HANDLE_VALUE) return true;
+    if (c.WaitForSingleObject(state.reader_thread, timeout_ms) != c.WAIT_OBJECT_0) return false;
     _ = c.CloseHandle(state.reader_thread);
     state.reader_thread = c.INVALID_HANDLE_VALUE;
+    return true;
 }
 
 fn finalizeState(state: *State) void {
@@ -202,8 +205,9 @@ fn finalizeState(state: *State) void {
 
 fn cleanupThread(param: ?*anyopaque) callconv(.winapi) c.DWORD {
     const state: *State = @ptrCast(@alignCast(param.?));
-    waitForReaderThread(state, c.INFINITE);
-    finalizeState(state);
+    if (waitForReaderThread(state, c.INFINITE)) {
+        finalizeState(state);
+    }
     return 0;
 }
 

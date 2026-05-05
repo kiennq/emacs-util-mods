@@ -6,6 +6,7 @@ pub const DispatchFn = *const fn (u32, ?*emacs.c.emacs_env, isize, [*c]emacs.c.e
 pub const VariableGetFn = *const fn (u32, ?*emacs.c.emacs_env, ?*anyopaque) callconv(.c) emacs.c.emacs_value;
 pub const VariableSetFn = *const fn (u32, ?*emacs.c.emacs_env, emacs.c.emacs_value, ?*anyopaque) callconv(.c) emacs.c.emacs_value;
 pub const CleanupFn = *const fn (?*emacs.c.emacs_env) callconv(.c) void;
+pub const CleanupSymbolName: [:0]const u8 = "loader_module_cleanup";
 
 pub const ExportKind = enum(u32) {
     function = 1,
@@ -35,7 +36,6 @@ pub const GenericManifest = extern struct {
     invoke: DispatchFn,
     get_variable: VariableGetFn,
     set_variable: VariableSetFn,
-    cleanup: ?CleanupFn,
 };
 
 pub const GenericLoaderModuleInitFn = *const fn (*GenericManifest) callconv(.c) void;
@@ -70,7 +70,6 @@ test "manifest can describe generic function and variable exports" {
         .invoke = undefined,
         .get_variable = undefined,
         .set_variable = undefined,
-        .cleanup = null,
     };
 
     try std.testing.expectEqual(@as(u32, 2), manifest.exports_len);
