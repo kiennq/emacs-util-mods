@@ -296,6 +296,11 @@ fn fnLoaderUnload(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: 
     return env.t();
 }
 
+fn fnLoaderCleanupRetiredFiles(raw_env: ?*c.emacs_env, _: isize, _: [*c]c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
+    const env = emacs.Env.init(raw_env.?);
+    return env.makeInteger(@intCast(state.cleanupRetiredLoadPaths()));
+}
+
 export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int {
     if (runtime.size < @sizeOf(c.struct_emacs_runtime)) return 1;
 
@@ -322,6 +327,18 @@ export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int
         1,
         &fnLoaderUnload,
         "Unload a previously loaded module by MODULE-ID.\n\n(dyn-loader-unload MODULE-ID)",
+    );
+    env.bindFunction(
+        "dyn-loader-cleanup-retired-files",
+        0,
+        0,
+        &fnLoaderCleanupRetiredFiles,
+        "Retry cleanup of retired dyn-loader shadow files.\n\n(dyn-loader-cleanup-retired-files)",
+    );
+    _ = env.call2(
+        env.intern("add-hook"),
+        env.intern("kill-emacs-hook"),
+        env.intern("dyn-loader-cleanup-retired-files"),
     );
     emacs.initSymbols(env);
     env.provide("dyn-loader-module");
@@ -477,4 +494,11 @@ test "loader manifest json uses module_path" {
 
     try std.testing.expectEqual(@as(u32, 1), parsed.value.loader_abi);
     try std.testing.expectEqualStrings("sample-module.dll", parsed.value.module_path);
+}
+
+test "loader registers retired shadow cleanup hook" {
+    const source = @embedFile("module.zig");
+    try std.testing.expect(std.mem.indexOf(u8, source, "dyn-loader-cleanup-retired-files") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "state.cleanupRetiredLoadPaths()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "kill-emacs-hook") != null);
 }

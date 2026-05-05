@@ -23,52 +23,122 @@ pub const FunctionHandle = struct {
     }
 };
 
-const retired_live_unload_delay_ns = if (builtin.is_test)
-    50 * std.time.ns_per_ms
-else
-    30 * std.time.ns_per_s;
-
 const RetiredLiveModule = struct {
     library: ?dynlib.Library,
     target_path: []u8,
     load_path: []u8,
 
-    fn deinit(self: *RetiredLiveModule) void {
-        if (self.library) |*library| library.close();
-        cleanupLoadPath(self.load_path, self.target_path);
-        std.heap.page_allocator.free(self.target_path);
-        std.heap.page_allocator.free(self.load_path);
-        std.heap.page_allocator.destroy(self);
+    fn cleanupLoadFile(self: *RetiredLiveModule) bool {
+        if (self.load_path.len == 0) return false;
+        if (!cleanupLoadPath(self.load_path, self.target_path)) return false;
+
+        const allocator = std.heap.page_allocator;
+        allocator.free(self.target_path);
+        allocator.free(self.load_path);
+        self.target_path = &[_]u8{};
+        self.load_path = &[_]u8{};
+        return true;
+    }
+
+    fn closeForReset(self: *RetiredLiveModule) void {
+        if (self.library) |*library| {
+            library.close();
+            self.library = null;
+        }
+        _ = self.cleanupLoadFile();
+        const allocator = std.heap.page_allocator;
+        if (self.target_path.len != 0) allocator.free(self.target_path);
+        if (self.load_path.len != 0) allocator.free(self.load_path);
+        allocator.destroy(self);
     }
 };
 
-fn retireLiveModule(library: ?dynlib.Library, target_path: []const u8, load_path: []const u8) void {
+var retired_live_modules: std.ArrayListUnmanaged(*RetiredLiveModule) = .{};
+
+fn retainLiveModule(library: ?dynlib.Library, target_path: []const u8, load_path: []const u8) void {
     const allocator = std.heap.page_allocator;
-    const retired = allocator.create(RetiredLiveModule) catch return;
+    const retired = allocator.create(RetiredLiveModule) catch {
+        _ = cleanupLoadPath(load_path, target_path);
+        return;
+    };
     retired.* = .{
         .library = library,
         .target_path = allocator.dupe(u8, target_path) catch {
             allocator.destroy(retired);
+            _ = cleanupLoadPath(load_path, target_path);
             return;
         },
         .load_path = allocator.dupe(u8, load_path) catch {
             allocator.free(retired.target_path);
             allocator.destroy(retired);
+            _ = cleanupLoadPath(load_path, target_path);
             return;
         },
     };
 
-    const thread = std.Thread.spawn(.{}, retireLiveModuleThread, .{retired}) catch {
-        retired.library = null;
-        retired.deinit();
+    retired_live_modules.append(allocator, retired) catch {
+        // Keep the DLL mapped even if bookkeeping allocation fails.
+        _ = retired.cleanupLoadFile();
+        if (retired.target_path.len != 0) allocator.free(retired.target_path);
+        if (retired.load_path.len != 0) allocator.free(retired.load_path);
+        allocator.destroy(retired);
         return;
     };
-    thread.detach();
+    _ = retired.cleanupLoadFile();
 }
 
-fn retireLiveModuleThread(retired: *RetiredLiveModule) void {
-    std.Thread.sleep(retired_live_unload_delay_ns);
-    retired.deinit();
+pub fn cleanupRetiredLoadPaths() usize {
+    var removed: usize = 0;
+    for (retired_live_modules.items) |retired| {
+        if (retired.cleanupLoadFile()) removed += 1;
+    }
+    return removed;
+}
+
+fn closeRetainedLiveModulesForReset() void {
+    for (retired_live_modules.items) |retired| {
+        retired.closeForReset();
+    }
+    retired_live_modules.deinit(std.heap.page_allocator);
+    retired_live_modules = .{};
+}
+
+fn cleanupStaleShadowCopies(allocator: std.mem.Allocator, target_path: []const u8) void {
+    const dir_path = std.fs.path.dirname(target_path) orelse ".";
+    const base = std.fs.path.basename(target_path);
+    const ext = std.fs.path.extension(base);
+    const stem = base[0 .. base.len - ext.len];
+    const prefix = std.fmt.allocPrint(allocator, ".{s}.load.", .{stem}) catch return;
+    defer allocator.free(prefix);
+
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return
+    else
+        std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var iterator = dir.iterate();
+    while (iterator.next() catch return) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+        if (!std.mem.endsWith(u8, entry.name, ext)) continue;
+        dir.deleteFile(entry.name) catch {};
+    }
+}
+
+fn deleteLoadPath(load_path: []const u8) bool {
+    if (std.fs.path.isAbsolute(load_path)) {
+        std.fs.deleteFileAbsolute(load_path) catch |err| switch (err) {
+            error.FileNotFound => return true,
+            else => return false,
+        };
+    } else {
+        std.fs.cwd().deleteFile(load_path) catch |err| switch (err) {
+            error.FileNotFound => return true,
+            else => return false,
+        };
+    }
+    return true;
 }
 
 pub const CandidateModule = struct {
@@ -84,7 +154,7 @@ pub const CandidateModule = struct {
     pub fn deinit(self: *CandidateModule, raw_env: ?*emacs.c.emacs_env) void {
         if (self.cleanup) |cleanup| cleanup(raw_env);
         if (self.library) |*library| library.close();
-        cleanupLoadPath(self.load_path, self.target_path);
+        _ = cleanupLoadPath(self.load_path, self.target_path);
         self.allocator.free(self.manifest_path);
         self.allocator.free(self.target_path);
         self.allocator.free(self.load_path);
@@ -143,10 +213,7 @@ pub const LiveModuleState = struct {
 
     fn deinit(self: *LiveModuleState, allocator: std.mem.Allocator, raw_env: ?*emacs.c.emacs_env) void {
         if (self.cleanup) |cleanup| cleanup(raw_env);
-        // Defer unloading retired live DLLs.  Reloaded modules use shadow
-        // copies, so this keeps old code mapped while fire-and-forget cleanup
-        // finishes, without blocking Emacs on the main thread.
-        retireLiveModule(self.library, self.target_path, self.load_path);
+        retainLiveModule(self.library, self.target_path, self.load_path);
         self.library = null;
         self.deinitExportsByName(allocator);
         allocator.free(self.target_path);
@@ -216,12 +283,9 @@ pub fn moduleAllocator() std.mem.Allocator {
     return module_arena.allocator();
 }
 
-fn cleanupLoadPath(load_path: []const u8, target_path: []const u8) void {
-    if (load_path.len == 0 or std.mem.eql(u8, load_path, target_path)) return;
-    if (std.fs.path.isAbsolute(load_path))
-        std.fs.deleteFileAbsolute(load_path) catch {}
-    else
-        std.fs.cwd().deleteFile(load_path) catch {};
+fn cleanupLoadPath(load_path: []const u8, target_path: []const u8) bool {
+    if (load_path.len == 0 or std.mem.eql(u8, load_path, target_path)) return true;
+    return deleteLoadPath(load_path);
 }
 
 fn copyShadowSource(target_path: []const u8, shadow_path: []const u8) !void {
@@ -237,6 +301,8 @@ fn copyShadowSource(target_path: []const u8, shadow_path: []const u8) !void {
 }
 
 fn createShadowCopyPath(allocator: std.mem.Allocator, target_path: []const u8) ![]u8 {
+    cleanupStaleShadowCopies(allocator, target_path);
+
     const dir = std.fs.path.dirname(target_path) orelse ".";
     const base = std.fs.path.basename(target_path);
     const ext = std.fs.path.extension(base);
@@ -269,7 +335,7 @@ pub fn openCandidate(
 ) !CandidateModule {
     const load_path = try createShadowCopyPath(allocator, target_path);
     errdefer allocator.free(load_path);
-    errdefer cleanupLoadPath(load_path, target_path);
+    errdefer _ = cleanupLoadPath(load_path, target_path);
 
     var library = try dynlib.Library.open(allocator, load_path);
     errdefer library.close();
@@ -354,6 +420,7 @@ pub fn functionHandle(
 
 pub fn reset() void {
     for (loaded_module_order.items) |module| module.deinit();
+    closeRetainedLiveModulesForReset();
     if (registry_allocator) |alloc| {
         loaded_modules.deinit(alloc);
         loaded_module_order.deinit(alloc);
@@ -650,7 +717,7 @@ test "live module unload retires library handles instead of closing them" {
     const live_source = source[live_start..live_end];
     const old_live_close = "if (self.library) |*library| " ++ "library.close();";
     try std.testing.expect(std.mem.indexOf(u8, live_source, old_live_close) == null);
-    try std.testing.expect(std.mem.indexOf(u8, live_source, "retireLiveModule(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, live_source, "retainLiveModule(") != null);
 }
 
 fn testPathExists(path: []const u8) bool {
@@ -661,16 +728,7 @@ fn testPathExists(path: []const u8) bool {
     return true;
 }
 
-fn waitForTestPathDeleted(path: []const u8) !bool {
-    const deadline = std.time.milliTimestamp() + 2000;
-    while (std.time.milliTimestamp() < deadline) {
-        if (!testPathExists(path)) return true;
-        std.Thread.sleep(10 * std.time.ns_per_ms);
-    }
-    return !testPathExists(path);
-}
-
-test "live module unload removes retired shadow copy asynchronously" {
+test "live module unload keeps retired handle and cleans unlocked shadow copy" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
     const allocator = std.testing.allocator;
@@ -692,11 +750,35 @@ test "live module unload removes retired shadow copy asynchronously" {
         .generic_manifest = std.mem.zeroes(abi.GenericManifest),
         .cleanup = null,
     };
+    defer reset();
 
     live_state.deinit(allocator, null);
 
-    try std.testing.expect(testPathExists(load_path));
-    try std.testing.expect(try waitForTestPathDeleted(load_path));
+    try std.testing.expectEqual(@as(usize, 1), retired_live_modules.items.len);
+    try std.testing.expect(!testPathExists(load_path));
+    try std.testing.expectEqual(@as(usize, 0), retired_live_modules.items[0].load_path.len);
+}
+
+test "createShadowCopyPath removes stale unlocked load copies first" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const allocator = std.testing.allocator;
+    const dir_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const target_path = try std.fs.path.join(allocator, &.{ dir_path, "sample-module.dll" });
+    defer allocator.free(target_path);
+    const stale_path = try std.fs.path.join(allocator, &.{ dir_path, ".sample-module.load.stale.dll" });
+    defer allocator.free(stale_path);
+
+    try tmp_dir.dir.writeFile(.{ .sub_path = "sample-module.dll", .data = "target" });
+    try tmp_dir.dir.writeFile(.{ .sub_path = ".sample-module.load.stale.dll", .data = "stale" });
+
+    const shadow_path = try createShadowCopyPath(allocator, target_path);
+    defer allocator.free(shadow_path);
+    defer _ = cleanupLoadPath(shadow_path, target_path);
+
+    try std.testing.expect(!testPathExists(stale_path));
+    try std.testing.expect(testPathExists(shadow_path));
 }
 
 test "module slot unload preserves stable identity and manifest path" {
