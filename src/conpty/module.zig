@@ -227,7 +227,7 @@ fn bindExportDescriptor(env: emacs.Env, descriptor: *const loader.ExportDescript
                 descriptor.docstring,
                 @ptrCast(@constCast(descriptor)),
             );
-            _ = env.call2(env.intern("fset"), env.intern(descriptor.lisp_name), function);
+            _ = env.f("fset", .{ env.intern(descriptor.lisp_name), function });
         },
         @intFromEnum(loader.ExportKind.variable) => {
             const value = getVariable(
@@ -235,7 +235,7 @@ fn bindExportDescriptor(env: emacs.Env, descriptor: *const loader.ExportDescript
                 env.raw,
                 @ptrCast(@constCast(descriptor)),
             );
-            _ = env.call2(env.intern("set"), env.intern(descriptor.lisp_name), value);
+            _ = env.f("set", .{ env.intern(descriptor.lisp_name), value });
         },
         else => unreachable,
     }

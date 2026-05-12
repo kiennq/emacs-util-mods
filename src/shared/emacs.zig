@@ -32,38 +32,36 @@ pub const Env = struct {
 
     // --- Function calls ---
 
-    pub fn funcall(self: Env, func: Value, args: []Value) Value {
-        return self.raw.funcall.?(self.raw, func, @intCast(args.len), args.ptr);
+    pub fn funcall(self: Env, func: Value, args: []const Value) Value {
+        return self.raw.funcall.?(self.raw, func, @intCast(args.len), @constCast(args.ptr));
     }
 
-    pub fn call0(self: Env, func: Value) Value {
-        return self.raw.funcall.?(self.raw, func, 0, null);
+    pub fn f(self: Env, comptime func: []const u8, args: anytype) Value {
+        return self.funcall(@field(sym, func), &self.makeValues(args));
     }
 
-    pub fn call1(self: Env, func: Value, a0: Value) Value {
-        var args = [_]Value{a0};
-        return self.raw.funcall.?(self.raw, func, 1, &args);
+    // --- Accessing values ---
+
+    pub fn set(self: Env, comptime symbol: []const u8, value: anytype) void {
+        _ = self.f("set", .{ @field(sym, symbol), value });
     }
 
-    pub fn call2(self: Env, func: Value, a0: Value, a1: Value) Value {
-        var args = [_]Value{ a0, a1 };
-        return self.raw.funcall.?(self.raw, func, 2, &args);
-    }
-
-    pub fn call3(self: Env, func: Value, a0: Value, a1: Value, a2: Value) Value {
-        var args = [_]Value{ a0, a1, a2 };
-        return self.raw.funcall.?(self.raw, func, 3, &args);
-    }
-
-    pub fn call4(self: Env, func: Value, a0: Value, a1: Value, a2: Value, a3: Value) Value {
-        var args = [_]Value{ a0, a1, a2, a3 };
-        return self.raw.funcall.?(self.raw, func, 4, &args);
+    pub fn symbolValue(self: Env, comptime symbol: []const u8) Value {
+        return self.f("symbol-value", .{@field(sym, symbol)});
     }
 
     // --- Type constructors ---
 
+    pub fn list(self: Env, items: anytype) Value {
+        return self.f("list", items);
+    }
+
     pub fn makeInteger(self: Env, n: i64) Value {
         return self.raw.make_integer.?(self.raw, @intCast(n));
+    }
+
+    pub fn makeFloat(self: Env, n: f64) Value {
+        return self.raw.make_float.?(self.raw, n);
     }
 
     pub fn makeString(self: Env, str: []const u8) Value {
@@ -72,6 +70,38 @@ pub const Env = struct {
 
     pub fn makeUserPtr(self: Env, finalizer: ?*const fn (?*anyopaque) callconv(.c) void, ptr: ?*anyopaque) Value {
         return self.raw.make_user_ptr.?(self.raw, finalizer, ptr);
+    }
+
+    pub fn makeValues(self: Env, args: anytype) [std.meta.fields(@TypeOf(args)).len]Value {
+        const fields = std.meta.fields(@TypeOf(args));
+        var converted_args: [fields.len]Value = undefined;
+        inline for (fields, 0..) |field, i| {
+            converted_args[i] = self.makeValue(@field(args, field.name));
+        }
+        return converted_args;
+    }
+
+    pub fn makeValue(self: Env, value: anytype) Value {
+        const T = @TypeOf(value);
+        if (T == Value) return value;
+
+        switch (@typeInfo(T)) {
+            .float, .comptime_float => return self.makeFloat(value),
+            .int, .comptime_int => return self.makeInteger(@as(i64, @intCast(value))),
+            .optional => return if (value) |v| self.makeValue(v) else self.nil(),
+            .bool => return if (value) self.t() else self.nil(),
+            .pointer => |ptr| {
+                if (comptime isStringLike(ptr)) return self.makeString(value);
+                if (T == *c.struct_emacs_value_tag) return value;
+            },
+            else => {},
+        }
+
+        @compileError(std.fmt.comptimePrint("Non-supported type: {}", .{T}));
+    }
+
+    pub fn cons(self: Env, car: anytype, cdr: anytype) Value {
+        return self.f("cons", .{ car, cdr });
     }
 
     pub fn getUserPtr(self: Env, comptime T: type, val: Value) ?*T {
@@ -83,6 +113,10 @@ pub const Env = struct {
 
     pub fn extractInteger(self: Env, val: Value) i64 {
         return @intCast(self.raw.extract_integer.?(self.raw, val));
+    }
+
+    pub fn extractFloat(self: Env, val: Value) f64 {
+        return self.raw.extract_float.?(self.raw, val);
     }
 
     pub fn extractString(self: Env, val: Value, buf: []u8) ?[]const u8 {
@@ -124,6 +158,10 @@ pub const Env = struct {
     }
 
     // --- Type checking ---
+
+    pub fn isNil(self: Env, val: Value) bool {
+        return !self.isNotNil(val);
+    }
 
     pub fn isNotNil(self: Env, val: Value) bool {
         return self.raw.is_not_nil.?(self.raw, val);
@@ -188,66 +226,75 @@ pub const Env = struct {
     pub fn bindFunction(self: Env, name: [*:0]const u8, min_arity: i32, max_arity: i32, func: *const fn (?*c.emacs_env, isize, [*c]c.emacs_value, ?*anyopaque) callconv(.c) c.emacs_value, docstring: [*:0]const u8) void {
         const fun = self.makeFunction(min_arity, max_arity, func, docstring, null);
         const name_sym = self.intern(name);
-        _ = self.call2(self.intern("fset"), name_sym, fun);
+        _ = self.f("fset", .{ name_sym, fun });
     }
 
     /// Call (provide 'feature).
     pub fn provide(self: Env, feature: [*:0]const u8) void {
-        _ = self.call1(self.intern("provide"), self.intern(feature));
+        _ = self.f("provide", .{self.intern(feature)});
     }
 
     // --- Buffer helpers ---
 
     pub fn point(self: Env) Value {
-        return self.call0(sym.point);
+        return self.f("point", .{});
     }
 
     pub fn gotoChar(self: Env, pos: Value) void {
-        _ = self.call1(sym.@"goto-char", pos);
+        _ = self.f("goto-char", .{pos});
     }
 
     pub fn gotoCharN(self: Env, pos: i64) void {
-        _ = self.call1(sym.@"goto-char", self.makeInteger(pos));
+        _ = self.f("goto-char", .{pos});
     }
 
     pub fn insert(self: Env, text: []const u8) void {
-        _ = self.call1(sym.insert, self.makeString(text));
+        _ = self.f("insert", .{text});
     }
 
     pub fn forwardLine(self: Env, n: i64) i64 {
-        return self.extractInteger(self.call1(sym.@"forward-line", self.makeInteger(n)));
+        return self.extractInteger(self.f("forward-line", .{n}));
     }
 
     pub fn moveToColumn(self: Env, col: i64) void {
-        _ = self.call1(sym.@"move-to-column", self.makeInteger(col));
+        _ = self.f("move-to-column", .{col});
     }
 
     pub fn eraseBuffer(self: Env) void {
-        _ = self.call0(sym.@"erase-buffer");
+        _ = self.f("erase-buffer", .{});
     }
 
     pub fn lineEndPosition(self: Env) Value {
-        return self.call0(sym.@"line-end-position");
+        return self.f("line-end-position", .{});
     }
 
     pub fn pointMax(self: Env) Value {
-        return self.call0(sym.@"point-max");
+        return self.f("point-max", .{});
     }
 
     pub fn deleteRegion(self: Env, start: Value, end: Value) void {
-        _ = self.call2(sym.@"delete-region", start, end);
+        _ = self.f("delete-region", .{ start, end });
     }
 
     pub fn putTextProperty(self: Env, start: Value, end: Value, prop: Value, value: Value) void {
-        _ = self.call4(sym.@"put-text-property", start, end, prop, value);
+        _ = self.f("put-text-property", .{ start, end, prop, value });
     }
 
     /// Signal an error with a message string.
     pub fn signalError(self: Env, msg: []const u8) void {
         self.nonLocalExitSignal(
-            self.intern("error"),
-            self.call1(self.intern("list"), self.makeString(msg)),
+            sym.@"error",
+            self.f("list", .{self.makeString(msg)}),
         );
+    }
+
+    fn isStringLike(comptime ty: std.builtin.Type.Pointer) bool {
+        const child_info = @typeInfo(ty.child);
+        return switch (ty.size) {
+            .slice => ty.child == u8,
+            .one => child_info == .array and child_info.array.child == u8,
+            else => false,
+        };
     }
 };
 
@@ -257,70 +304,53 @@ pub const Env = struct {
 // stays valid across different emacs_env pointers.
 // ---------------------------------------------------------------------------
 
-pub const Sym = struct {
-    // Common values
-    nil: Value,
-    t: Value,
-
-    // Face property keywords
-    @":foreground": Value,
-    @":background": Value,
-    @":weight": Value,
-    @":slant": Value,
-    @":underline": Value,
-    @":style": Value,
-    @":color": Value,
-    @":strike-through": Value,
-
-    // Face property values
-    bold: Value,
-    light: Value,
-    italic: Value,
-    wave: Value,
-    @"double-line": Value,
-    dot: Value,
-    dash: Value,
-    line: Value,
-
-    // Built-in functions
-    list: Value,
-    @"symbol-value": Value,
-    @"put-text-property": Value,
-    @"goto-char": Value,
-    point: Value,
-    insert: Value,
-    @"forward-line": Value,
-    @"move-to-column": Value,
-    @"erase-buffer": Value,
-    @"line-end-position": Value,
-    @"point-max": Value,
-    @"delete-region": Value,
-
-    // Text property names
-    face: Value,
-    @"help-echo": Value,
-    @"mouse-face": Value,
-    highlight: Value,
-    keymap: Value,
-    @"ghostel-wrap": Value,
-    @"ghostel-prompt": Value,
-
-    // Ghostel symbols
-    @"ghostel-link-map": Value,
-    @"ghostel--set-buffer-face": Value,
-    @"ghostel--detect-urls": Value,
-    @"ghostel--compensate-wide-chars": Value,
-    @"ghostel--set-cursor-style": Value,
-    @"ghostel--update-directory": Value,
-    @"ghostel--osc51-eval": Value,
-    @"ghostel--osc52-handle": Value,
-    @"ghostel--osc133-marker": Value,
-    @"ghostel--flush-output": Value,
-    @"ghostel--set-title": Value,
-    ding: Value,
+const interned_symbols = [_][:0]const u8{
+    "add-hook",
+    "boundp",
+    "car",
+    "cdr",
+    "cons",
+    "delete-region",
+    "erase-buffer",
+    "error",
+    "forward-line",
+    "fset",
+    "goto-char",
+    "insert",
+    "line-end-position",
+    "list",
+    "move-to-column",
+    "nil",
+    "point",
+    "point-max",
+    "provide",
+    "put-text-property",
+    "remhash",
+    "set",
+    "symbol-value",
+    "t",
 };
 
-pub var sym: Sym = undefined;
+fn SymbolCache(comptime symbols: []const [:0]const u8) type {
+    var cache_fields: [symbols.len]std.builtin.Type.StructField = undefined;
+    for (symbols, 0..) |symbol, i| {
+        cache_fields[i] = .{
+            .name = symbol,
+            .type = Value,
+            .default_value_ptr = null,
+            .is_comptime = false,
+            .alignment = @alignOf(Value),
+        };
+    }
+    return @Type(.{ .@"struct" = .{
+        .layout = .auto,
+        .fields = &cache_fields,
+        .decls = &[_]std.builtin.Type.Declaration{},
+        .is_tuple = false,
+    } });
+}
+
+pub var sym: SymbolCache(&interned_symbols) = undefined;
 var sym_initialized = false;
 
 fn ensureSymbols(env: Env) void {
@@ -331,7 +361,7 @@ fn ensureSymbols(env: Env) void {
 /// emacs_module_init with the environment provided by Emacs.
 pub fn initSymbols(env: Env) void {
     if (sym_initialized) return;
-    inline for (std.meta.fields(Sym)) |field| {
+    inline for (std.meta.fields(@TypeOf(sym))) |field| {
         @field(sym, field.name) = env.makeGlobalRef(env.intern(field.name));
     }
     sym_initialized = true;

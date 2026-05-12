@@ -105,12 +105,12 @@ fn forwardGenericExport(raw_env: ?*c.emacs_env, nargs: isize, args: [*c]c.emacs_
 
 fn clearInstalledTrampoline(env: emacs.Env, function_symbol: c.emacs_value) void {
     const cache_symbol = env.intern("comp-installed-trampolines-h");
-    if (!env.isNotNil(env.call1(env.intern("boundp"), cache_symbol))) return;
+    if (!env.isNotNil(env.f("boundp", .{cache_symbol}))) return;
 
-    const cache = env.call1(emacs.sym.@"symbol-value", cache_symbol);
+    const cache = env.f("symbol-value", .{cache_symbol});
     if (!env.isNotNil(cache)) return;
 
-    _ = env.call2(env.intern("remhash"), function_symbol, cache);
+    _ = env.f("remhash", .{ function_symbol, cache });
 }
 
 fn registerGenericFunction(env: emacs.Env, module: *state.ModuleSlot, descriptor: *const abi.ExportDescriptor) !void {
@@ -124,13 +124,13 @@ fn registerGenericFunction(env: emacs.Env, module: *state.ModuleSlot, descriptor
         descriptor.docstring,
         @ptrCast(binding),
     );
-    _ = env.call2(env.intern("fset"), name_symbol, function);
+    _ = env.f("fset", .{ name_symbol, function });
 }
 
 fn registerGenericVariable(env: emacs.Env, module: *state.ModuleSlot, descriptor: *const abi.ExportDescriptor) void {
     const live_state = if (module.live_state) |*live_state| live_state else unreachable;
     const value = live_state.generic_manifest.get_variable(descriptor.export_id, env.raw, null);
-    _ = env.call2(env.intern("set"), env.intern(descriptor.lisp_name), value);
+    _ = env.f("set", .{ env.intern(descriptor.lisp_name), value });
 }
 
 fn registerGenericExports(env: emacs.Env, module: *state.ModuleSlot) !void {
@@ -151,16 +151,15 @@ fn makeLoadedModulesValue(env: emacs.Env) c.emacs_value {
     while (index > 0) {
         index -= 1;
         if (!modules[index].isLoaded()) continue;
-        list = env.call2(env.intern("cons"), env.makeString(modules[index].module_id), list);
+        list = env.cons(env.makeString(modules[index].module_id), list);
     }
     return list;
 }
 
 fn updateLoadedModulesVariable(env: emacs.Env) void {
-    _ = env.call2(
-        env.intern("set"),
-        env.intern("dyn-loader-loaded-modules"),
-        makeLoadedModulesValue(env),
+    _ = env.f(
+        "set",
+        .{ env.intern("dyn-loader-loaded-modules"), makeLoadedModulesValue(env) },
     );
 }
 
@@ -335,10 +334,9 @@ export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int
         &fnLoaderCleanupRetiredFiles,
         "Retry cleanup of retired dyn-loader shadow files.\n\n(dyn-loader-cleanup-retired-files)",
     );
-    _ = env.call2(
-        env.intern("add-hook"),
-        env.intern("kill-emacs-hook"),
-        env.intern("dyn-loader-cleanup-retired-files"),
+    _ = env.f(
+        "add-hook",
+        .{ env.intern("kill-emacs-hook"), env.intern("dyn-loader-cleanup-retired-files") },
     );
     emacs.initSymbols(env);
     env.provide("dyn-loader-module");

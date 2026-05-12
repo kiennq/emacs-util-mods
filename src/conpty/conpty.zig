@@ -369,15 +369,13 @@ fn buildEnvironmentBlock(allocator: std.mem.Allocator, env: emacs.Env, list: ema
     }
 
     var iter = list;
-    const car = env.intern("car");
-    const cdr = env.intern("cdr");
     while (env.isNotNil(iter)) {
-        const item = env.call1(car, iter);
+        const item = env.f("car", .{iter});
         const item_utf8 = env.extractStringAlloc(item, allocator) orelse
             return error.InvalidEnvironmentEntry;
         defer allocator.free(item_utf8);
         try overrides.append(allocator, try std.unicode.utf8ToUtf16LeAllocZ(allocator, item_utf8));
-        iter = env.call1(cdr, iter);
+        iter = env.f("cdr", .{iter});
     }
     if (overrides.items.len == 0) return null;
 

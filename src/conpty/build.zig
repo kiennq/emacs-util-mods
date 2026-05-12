@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const emacs_include = resolveEmacsIncludePath(b);
 
     const emacs_mod = b.createModule(.{
-        .root_source_file = b.path("emacs.zig"),
+        .root_source_file = b.path("../shared/emacs.zig"),
         .target = target,
         .optimize = optimize,
         .strip = strip_binaries,
