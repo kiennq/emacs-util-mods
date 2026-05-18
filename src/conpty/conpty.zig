@@ -30,6 +30,103 @@ const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
 const OUTPUT_BUFFER_SIZE = 64 * 1024;
 const PENDING_BUFFER_SIZE = 4 * 1024 * 1024;
 
+const NotifyCrtProvider = enum {
+    msvcrt,
+    ucrt,
+};
+
+const NotifyCrtWriteFn = *const fn (c_int, ?*const anyopaque, c_uint) callconv(.c) c_int;
+const NotifyCrtCloseFn = *const fn (c_int) callconv(.c) c_int;
+
+const NotifyCrt = struct {
+    write: NotifyCrtWriteFn,
+    close: NotifyCrtCloseFn,
+};
+
+fn notifyCrtProviderForImport(dll_name: []const u8, symbol_name: []const u8) ?NotifyCrtProvider {
+    if (!std.mem.eql(u8, symbol_name, "_dup")) return null;
+
+    if (std.ascii.eqlIgnoreCase(dll_name, "msvcrt.dll")) return .msvcrt;
+    if (std.ascii.eqlIgnoreCase(dll_name, "ucrtbase.dll")) return .ucrt;
+    if (std.ascii.startsWithIgnoreCase(dll_name, "api-ms-win-crt-")) return .ucrt;
+    return null;
+}
+
+fn ptrFromRva(comptime T: type, base: usize, rva: c.DWORD) *const T {
+    return @ptrFromInt(base + @as(usize, @intCast(rva)));
+}
+
+fn cStringFromRva(base: usize, rva: c.DWORD) []const u8 {
+    const ptr: [*:0]const u8 = @ptrFromInt(base + @as(usize, @intCast(rva)));
+    return std.mem.span(ptr);
+}
+
+fn importDescriptorHasSymbol(base: usize, descriptor: *const c.IMAGE_IMPORT_DESCRIPTOR, symbol_name: []const u8) bool {
+    const thunk_rva = if (descriptor.unnamed_0.OriginalFirstThunk != 0)
+        descriptor.unnamed_0.OriginalFirstThunk
+    else
+        descriptor.FirstThunk;
+    if (thunk_rva == 0) return false;
+
+    const thunks: [*]const c.IMAGE_THUNK_DATA = @ptrFromInt(base + @as(usize, @intCast(thunk_rva)));
+    var i: usize = 0;
+    while (thunks[i].u1.AddressOfData != 0) : (i += 1) {
+        const address = thunks[i].u1.AddressOfData;
+        const ordinal_flag = @as(@TypeOf(address), 1) << (@bitSizeOf(@TypeOf(address)) - 1);
+        if ((address & ordinal_flag) != 0) continue;
+
+        const import_by_name = ptrFromRva(c.IMAGE_IMPORT_BY_NAME, base, @intCast(address));
+        const name_addr = @intFromPtr(import_by_name) + @offsetOf(c.IMAGE_IMPORT_BY_NAME, "Name");
+        const import_name: [*:0]const u8 = @ptrFromInt(name_addr);
+        if (std.mem.eql(u8, std.mem.span(import_name), symbol_name)) return true;
+    }
+    return false;
+}
+
+fn findNotifyCrtProviderInImage(module: c.HMODULE) ?NotifyCrtProvider {
+    const base = @intFromPtr(module);
+    const dos = ptrFromRva(c.IMAGE_DOS_HEADER, base, 0);
+    if (dos.e_magic != c.IMAGE_DOS_SIGNATURE or dos.e_lfanew < 0) return null;
+
+    const nt: *const c.IMAGE_NT_HEADERS = @ptrFromInt(base + @as(usize, @intCast(dos.e_lfanew)));
+    if (nt.Signature != c.IMAGE_NT_SIGNATURE) return null;
+
+    const import_index: usize = @intCast(c.IMAGE_DIRECTORY_ENTRY_IMPORT);
+    if (nt.OptionalHeader.NumberOfRvaAndSizes <= import_index) return null;
+    const import_directory = nt.OptionalHeader.DataDirectory[import_index];
+    if (import_directory.VirtualAddress == 0) return null;
+
+    const descriptors: [*]const c.IMAGE_IMPORT_DESCRIPTOR = @ptrFromInt(base + @as(usize, @intCast(import_directory.VirtualAddress)));
+    var i: usize = 0;
+    while (descriptors[i].Name != 0) : (i += 1) {
+        const dll_name = cStringFromRva(base, descriptors[i].Name);
+        if (importDescriptorHasSymbol(base, &descriptors[i], "_dup")) {
+            if (notifyCrtProviderForImport(dll_name, "_dup")) |provider| return provider;
+        }
+    }
+    return null;
+}
+
+fn detectNotifyCrtProvider() !NotifyCrtProvider {
+    const module = c.GetModuleHandleW(null) orelse return error.NotifyCrtUnavailable;
+    return findNotifyCrtProviderInImage(module) orelse error.NotifyCrtUnavailable;
+}
+
+fn resolveNotifyCrt() !NotifyCrt {
+    const provider = try detectNotifyCrtProvider();
+    const dll_name = switch (provider) {
+        .msvcrt => std.unicode.utf8ToUtf16LeStringLiteral("msvcrt.dll"),
+        .ucrt => std.unicode.utf8ToUtf16LeStringLiteral("ucrtbase.dll"),
+    };
+    const module = c.GetModuleHandleW(dll_name) orelse return error.NotifyCrtUnavailable;
+    const write_proc = c.GetProcAddress(module, "_write") orelse return error.NotifyCrtUnavailable;
+    const close_proc = c.GetProcAddress(module, "_close") orelse return error.NotifyCrtUnavailable;
+    return .{
+        .write = @ptrCast(write_proc),
+        .close = @ptrCast(close_proc),
+    };
+}
+
 pub const State = if (is_windows) struct {
     arena: std.heap.ArenaAllocator,
     hpc: HPCON = null,
@@ -38,6 +135,7 @@ pub const State = if (is_windows) struct {
     shell_process: c.HANDLE = c.INVALID_HANDLE_VALUE,
     reader_thread: c.HANDLE = c.INVALID_HANDLE_VALUE,
     notify_fd: c_int = -1,
+    notify_crt: NotifyCrt,
     pending_lock: c.CRITICAL_SECTION = undefined,
     output_buf: *[2][OUTPUT_BUFFER_SIZE]u8,
     pending_buf: *[PENDING_BUFFER_SIZE]u8,
@@ -61,6 +159,7 @@ pub fn init(
 ) !*State {
     if (!is_windows) return error.UnsupportedPlatform;
     if (!(try initApi())) return error.MissingConpty;
+    const notify_crt = try resolveNotifyCrt();
 
     const state = try std.heap.page_allocator.create(State);
     var state_owned_by_init = true;
@@ -80,6 +179,7 @@ pub fn init(
     state.shell_process = c.INVALID_HANDLE_VALUE;
     state.reader_thread = c.INVALID_HANDLE_VALUE;
     state.notify_fd = -1;
+    state.notify_crt = notify_crt;
     state.pending_len = 0;
     state.running = std.atomic.Value(u8).init(1);
 
@@ -91,8 +191,7 @@ pub fn init(
     if (state.notify_fd < 0) return error.OpenChannelFailed;
     var notify_fd_owned_by_init = true;
     errdefer if (notify_fd_owned_by_init) {
-        _ = c._close(state.notify_fd);
-        state.notify_fd = -1;
+        closeNotifyFd(state);
     };
 
     try createConpty(state, rows, cols);
@@ -180,11 +279,15 @@ fn waitForReaderThread(state: *State, timeout_ms: c.DWORD) bool {
     return true;
 }
 
-fn finalizeState(state: *State) void {
+fn closeNotifyFd(state: *State) void {
     if (state.notify_fd >= 0) {
-        _ = c._close(state.notify_fd);
+        _ = state.notify_crt.close(state.notify_fd);
         state.notify_fd = -1;
     }
+}
+
+fn finalizeState(state: *State) void {
+    closeNotifyFd(state);
 
     c.DeleteCriticalSection(&state.pending_lock);
     state.arena.deinit();
@@ -486,19 +589,23 @@ fn readerThread(param: ?*anyopaque) callconv(.winapi) c.DWORD {
         }
         c.LeaveCriticalSection(&state.pending_lock);
 
-        notify(state.notify_fd);
+        notify(state);
         slot = (slot + 1) % state.output_buf.len;
     }
 
     state.running.store(0, .release);
-    notify(state.notify_fd);
+    notify(state);
     return 0;
 }
 
-fn notify(fd: c_int) void {
-    if (fd < 0) return;
+fn notify(state: *State) void {
+    if (state.notify_fd < 0) return;
     const signal = [_]u8{'1'};
-    _ = c._write(fd, &signal, signal.len);
+    _ = state.notify_crt.write(
+        state.notify_fd,
+        @as(?*const anyopaque, @ptrCast(signal[0..].ptr)),
+        @intCast(signal.len),
+    );
 }
 
 test "buildEnvironmentBlockFromEntries preserves base entries and overrides matching keys" {
@@ -529,6 +636,38 @@ test "module cleanup paths use fire-and-forget teardown" {
     const source = @embedFile("module.zig");
     try std.testing.expect(std.mem.indexOf(u8, source, "Conpty.deinitSync") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "Conpty.deinit(") != null);
+}
+
+test "notify CRT provider follows the CRT that owns Emacs dup" {
+    try std.testing.expectEqual(
+        NotifyCrtProvider.msvcrt,
+        notifyCrtProviderForImport("msvcrt.dll", "_dup").?,
+    );
+    try std.testing.expectEqual(
+        NotifyCrtProvider.ucrt,
+        notifyCrtProviderForImport("api-ms-win-crt-stdio-l1-1-0.dll", "_dup").?,
+    );
+    try std.testing.expectEqual(
+        NotifyCrtProvider.ucrt,
+        notifyCrtProviderForImport("ucrtbase.dll", "_dup").?,
+    );
+}
+
+test "notify CRT provider ignores non-dup CRT imports" {
+    try std.testing.expectEqual(
+        @as(?NotifyCrtProvider, null),
+        notifyCrtProviderForImport("msvcrt.dll", "_write"),
+    );
+    try std.testing.expectEqual(
+        @as(?NotifyCrtProvider, null),
+        notifyCrtProviderForImport("kernel32.dll", "_dup"),
+    );
+}
+
+test "notify channel avoids module CRT fd operations" {
+    const source = @embedFile("conpty.zig");
+    try std.testing.expect(std.mem.indexOf(u8, source, "c." ++ "_write") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "c." ++ "_close") == null);
 }
 
 test "buildEnvironmentBlockFromEntries treats bare overrides as unsets" {
@@ -594,6 +733,7 @@ test "deinit returns without waiting for the reader thread" {
     state.pty_output = c.INVALID_HANDLE_VALUE;
     state.shell_process = c.INVALID_HANDLE_VALUE;
     state.notify_fd = -1;
+    state.notify_crt = undefined;
     state.pending_len = 0;
     state.running = std.atomic.Value(u8).init(1);
     c.InitializeCriticalSection(&state.pending_lock);
