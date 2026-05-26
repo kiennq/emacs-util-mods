@@ -253,7 +253,7 @@ fn fnLoaderLoadManifest(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_valu
     const env = emacs.Env.init(raw_env.?);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const manifest_path = env.extractString(args[0], &path_buf) orelse {
+    const manifest_path = env.extractString(args[0], &path_buf) catch {
         env.signalError("dyn-loader: invalid loader manifest path");
         return env.nil();
     };
@@ -265,7 +265,7 @@ fn fnLoaderReload(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: 
     const env = emacs.Env.init(raw_env.?);
 
     var module_id_buf: [256]u8 = undefined;
-    const module_id = env.extractString(args[0], &module_id_buf) orelse {
+    const module_id = env.extractString(args[0], &module_id_buf) catch {
         env.signalError("dyn-loader: invalid module id");
         return env.nil();
     };
@@ -281,7 +281,7 @@ fn fnLoaderUnload(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: 
     const env = emacs.Env.init(raw_env.?);
 
     var module_id_buf: [256]u8 = undefined;
-    const module_id = env.extractString(args[0], &module_id_buf) orelse {
+    const module_id = env.extractString(args[0], &module_id_buf) catch {
         env.signalError("dyn-loader: invalid module id");
         return env.nil();
     };

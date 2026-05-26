@@ -50,19 +50,16 @@ fn fnConptyInit(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var command_stack: [512]u8 = undefined;
-    var cwd_stack: [512]u8 = undefined;
-    const command = env.extractString(args[2], &command_stack) orelse blk: {
-        break :blk env.extractStringAlloc(args[2], allocator);
-    };
-    const cwd = env.extractString(args[5], &cwd_stack) orelse blk: {
-        break :blk env.extractStringAlloc(args[5], allocator);
-    };
-
-    if (command == null or cwd == null) {
+    var command_buf: ?[]u8 = null;
+    var cwd_buf: ?[]u8 = null;
+    const command = env.extractStringAlloc(allocator, args[2], &command_buf) catch {
         env.signalError("conpty: invalid arguments");
         return env.nil();
-    }
+    };
+    const cwd = env.extractStringAlloc(allocator, args[5], &cwd_buf) catch {
+        env.signalError("conpty: invalid arguments");
+        return env.nil();
+    };
 
     if (remove(key)) |existing| {
         Conpty.deinit(existing);
@@ -71,10 +68,10 @@ fn fnConptyInit(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
     const state = Conpty.init(
         env,
         args[1],
-        command.?,
+        command,
         @intCast(env.extractInteger(args[3])),
         @intCast(env.extractInteger(args[4])),
-        cwd.?,
+        cwd,
         args[6],
         allocator,
     ) catch |err| {
@@ -113,13 +110,13 @@ fn fnConptyWrite(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var stack_buf: [65536]u8 = undefined;
-    const data = env.extractString(args[1], &stack_buf) orelse blk: {
-        break :blk env.extractStringAlloc(args[1], allocator);
+    var data_buf: ?[]u8 = null;
+    const data = env.extractStringAlloc(allocator, args[1], &data_buf) catch {
+        env.signalError("conpty: invalid input");
+        return env.nil();
     };
-    if (data == null) return env.nil();
 
-    Conpty.write(state, data.?) catch {
+    Conpty.write(state, data) catch {
         env.signalError("conpty: failed to write to backend");
         return env.nil();
     };

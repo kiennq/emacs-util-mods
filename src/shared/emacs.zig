@@ -119,42 +119,33 @@ pub const Env = struct {
         return self.raw.extract_float.?(self.raw, val);
     }
 
-    pub fn extractString(self: Env, val: Value, buf: []u8) ?[]const u8 {
+    pub fn extractString(self: Env, val: Value, buf: []u8) ![]const u8 {
         var len: isize = @intCast(buf.len);
         if (self.raw.copy_string_contents.?(self.raw, val, buf.ptr, &len)) {
             // len includes the null terminator
-            const actual_len: usize = @intCast(len);
-            if (actual_len > 0) {
-                return buf[0 .. actual_len - 1];
-            }
-            return buf[0..0];
+            return buf[0..(@as(usize, @intCast(len)) - 1)];
         }
         // Clear the non-local exit so callers (e.g. extractStringAlloc
         // fallback) can make further API calls.
-        self.raw.non_local_exit_clear.?(self.raw);
-        return null;
+        self.nonLocalExitClear();
+        return error.ExtractStringFailed;
     }
 
-    pub fn extractStringAlloc(self: Env, val: Value, allocator: std.mem.Allocator) ?[]const u8 {
-        // First call to get required size
-        var len: isize = 0;
-        _ = self.raw.copy_string_contents.?(self.raw, val, null, &len);
-        self.raw.non_local_exit_clear.?(self.raw);
-
-        if (len <= 0) return null;
-        const size: usize = @intCast(len);
-
-        const buf = allocator.alloc(u8, size) catch return null;
-        var actual_len: isize = @intCast(size);
-        if (self.raw.copy_string_contents.?(self.raw, val, buf.ptr, &actual_len)) {
-            const actual: usize = @intCast(actual_len);
-            if (actual > 0) {
-                return buf[0 .. actual - 1];
+    pub fn extractStringAlloc(self: Env, allocator: std.mem.Allocator, val: Value, buf: *?[]u8) ![]u8 {
+        const ptr = if (buf.*) |b| b.ptr else null;
+        var len: isize = if (buf.*) |b| @intCast(b.len) else 0;
+        if (!self.raw.copy_string_contents.?(self.raw, val, ptr, &len) or ptr == null) {
+            self.nonLocalExitClear();
+            if (buf.*) |b| allocator.free(b);
+            buf.* = try allocator.alloc(u8, @intCast(len));
+            if (!self.raw.copy_string_contents.?(self.raw, val, buf.*.?.ptr, &len)) {
+                self.nonLocalExitClear();
+                return error.ExtractStringFailed;
             }
-            return buf[0..0];
         }
-        allocator.free(buf);
-        return null;
+
+        // len includes the null terminator
+        return buf.*.?[0..(@as(usize, @intCast(len)) - 1)];
     }
 
     // --- Type checking ---
