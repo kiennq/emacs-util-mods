@@ -7,6 +7,7 @@ const is_windows = builtin.os.tag == .windows;
 const c = if (is_windows)
     @cImport({
         @cInclude("windows.h");
+        @cInclude("tlhelp32.h");
         @cInclude("io.h");
     })
 else
@@ -42,6 +43,11 @@ const NotifyCrt = struct {
     write: NotifyCrtWriteFn,
     close: NotifyCrtCloseFn,
 };
+
+const ConhostProcess = if (is_windows) struct {
+    pid: c.DWORD,
+    parent_pid: c.DWORD,
+} else struct {};
 
 fn notifyCrtProviderForImport(dll_name: []const u8, symbol_name: []const u8) ?NotifyCrtProvider {
     if (!std.mem.eql(u8, symbol_name, "_dup")) return null;
@@ -133,6 +139,7 @@ pub const State = if (is_windows) struct {
     pty_input: c.HANDLE = c.INVALID_HANDLE_VALUE,
     pty_output: c.HANDLE = c.INVALID_HANDLE_VALUE,
     shell_process: c.HANDLE = c.INVALID_HANDLE_VALUE,
+    conhost_process: c.HANDLE = c.INVALID_HANDLE_VALUE,
     reader_thread: c.HANDLE = c.INVALID_HANDLE_VALUE,
     notify_fd: c_int = -1,
     notify_crt: NotifyCrt,
@@ -177,6 +184,7 @@ pub fn init(
     state.pty_input = c.INVALID_HANDLE_VALUE;
     state.pty_output = c.INVALID_HANDLE_VALUE;
     state.shell_process = c.INVALID_HANDLE_VALUE;
+    state.conhost_process = c.INVALID_HANDLE_VALUE;
     state.reader_thread = c.INVALID_HANDLE_VALUE;
     state.notify_fd = -1;
     state.notify_crt = notify_crt;
@@ -242,14 +250,8 @@ pub fn deinit(state_opt: ?*State) void {
 fn requestShutdown(state: *State) void {
     state.running.store(0, .release);
 
-    if (state.shell_process != c.INVALID_HANDLE_VALUE) {
-        var exit_code: c.DWORD = 0;
-        if (c.GetExitCodeProcess(state.shell_process, &exit_code) != 0 and exit_code == c.STILL_ACTIVE) {
-            _ = c.TerminateProcess(state.shell_process, 1);
-        }
-        _ = c.CloseHandle(state.shell_process);
-        state.shell_process = c.INVALID_HANDLE_VALUE;
-    }
+    terminateProcessHandle(&state.shell_process);
+    terminateProcessHandle(&state.conhost_process);
 
     if (state.pty_input != c.INVALID_HANDLE_VALUE) {
         _ = c.CloseHandle(state.pty_input);
@@ -277,6 +279,22 @@ fn waitForReaderThread(state: *State, timeout_ms: c.DWORD) bool {
     _ = c.CloseHandle(state.reader_thread);
     state.reader_thread = c.INVALID_HANDLE_VALUE;
     return true;
+}
+
+fn terminateProcessHandle(process: *c.HANDLE) void {
+    if (process.* == c.INVALID_HANDLE_VALUE) return;
+
+    var should_terminate = true;
+    var exit_code: c.DWORD = 0;
+    if (c.GetExitCodeProcess(process.*, &exit_code) != 0) {
+        should_terminate = exit_code == c.STILL_ACTIVE;
+    }
+    if (should_terminate) {
+        _ = c.TerminateProcess(process.*, 1);
+    }
+
+    _ = c.CloseHandle(process.*);
+    process.* = c.INVALID_HANDLE_VALUE;
 }
 
 fn closeNotifyFd(state: *State) void {
@@ -365,11 +383,20 @@ fn initApi() !bool {
 }
 
 fn createConpty(state: *State, rows: u16, cols: u16) !void {
+    const allocator = std.heap.page_allocator;
+    const existing_conhosts = collectConhostProcesses(allocator) catch null;
+    defer if (existing_conhosts) |processes| allocator.free(processes);
+
     var in_read: c.HANDLE = c.INVALID_HANDLE_VALUE;
     var in_write: c.HANDLE = c.INVALID_HANDLE_VALUE;
     var out_read: c.HANDLE = c.INVALID_HANDLE_VALUE;
     var out_write: c.HANDLE = c.INVALID_HANDLE_VALUE;
     errdefer {
+        terminateProcessHandle(&state.conhost_process);
+        if (state.hpc != null) {
+            close_pseudo_console.?(state.hpc);
+            state.hpc = null;
+        }
         if (in_read != c.INVALID_HANDLE_VALUE) _ = c.CloseHandle(in_read);
         if (in_write != c.INVALID_HANDLE_VALUE) _ = c.CloseHandle(in_write);
         if (out_read != c.INVALID_HANDLE_VALUE) _ = c.CloseHandle(out_read);
@@ -390,12 +417,87 @@ fn createConpty(state: *State, rows: u16, cols: u16) !void {
     if (create_pseudo_console.?(size, in_read, out_write, 0, &state.hpc) < 0) {
         return error.CreatePseudoConsoleFailed;
     }
+    if (existing_conhosts) |processes| {
+        state.conhost_process = openCreatedConhostProcess(allocator, processes);
+    }
 
     state.pty_input = in_write;
     state.pty_output = out_read;
 
     _ = c.CloseHandle(in_read);
     _ = c.CloseHandle(out_write);
+}
+
+fn collectConhostProcesses(allocator: std.mem.Allocator) ![]ConhostProcess {
+    var processes = std.ArrayList(ConhostProcess).empty;
+    errdefer processes.deinit(allocator);
+
+    const snapshot = c.CreateToolhelp32Snapshot(c.TH32CS_SNAPPROCESS, 0);
+    if (snapshot == c.INVALID_HANDLE_VALUE) return error.ProcessSnapshotFailed;
+    defer _ = c.CloseHandle(snapshot);
+
+    var entry = std.mem.zeroes(c.PROCESSENTRY32W);
+    entry.dwSize = @sizeOf(c.PROCESSENTRY32W);
+    if (c.Process32FirstW(snapshot, &entry) == 0) return error.ProcessSnapshotFailed;
+
+    while (true) {
+        if (wideStringEqualsAsciiIgnoreCase(entry.szExeFile[0..], "conhost.exe")) {
+            try processes.append(allocator, .{
+                .pid = entry.th32ProcessID,
+                .parent_pid = entry.th32ParentProcessID,
+            });
+        }
+        if (c.Process32NextW(snapshot, &entry) == 0) {
+            if (c.GetLastError() == c.ERROR_NO_MORE_FILES) break;
+            return error.ProcessSnapshotFailed;
+        }
+    }
+
+    return try processes.toOwnedSlice(allocator);
+}
+
+fn openCreatedConhostProcess(allocator: std.mem.Allocator, existing_conhosts: []const ConhostProcess) c.HANDLE {
+    const current_conhosts = collectConhostProcesses(allocator) catch return c.INVALID_HANDLE_VALUE;
+    defer allocator.free(current_conhosts);
+
+    const pid = createdConhostPid(
+        existing_conhosts,
+        current_conhosts,
+        c.GetCurrentProcessId(),
+    ) orelse return c.INVALID_HANDLE_VALUE;
+    return c.OpenProcess(c.PROCESS_TERMINATE, c.FALSE, pid) orelse c.INVALID_HANDLE_VALUE;
+}
+
+fn createdConhostPid(
+    existing_conhosts: []const ConhostProcess,
+    current_conhosts: []const ConhostProcess,
+    parent_pid: c.DWORD,
+) ?c.DWORD {
+    var found_pid: ?c.DWORD = null;
+    for (current_conhosts) |process| {
+        if (process.parent_pid != parent_pid) continue;
+        if (containsProcessPid(existing_conhosts, process.pid)) continue;
+        if (found_pid != null) return null;
+        found_pid = process.pid;
+    }
+    return found_pid;
+}
+
+fn containsProcessPid(processes: []const ConhostProcess, pid: c.DWORD) bool {
+    for (processes) |process| {
+        if (process.pid == pid) return true;
+    }
+    return false;
+}
+
+fn wideStringEqualsAsciiIgnoreCase(wide: []const c.WCHAR, ascii: []const u8) bool {
+    const wide_name = std.mem.sliceTo(wide, 0);
+    if (wide_name.len != ascii.len) return false;
+
+    for (wide_name, ascii) |wide_char, ascii_char| {
+        if (lowerAscii(@intCast(wide_char)) != lowerAscii(ascii_char)) return false;
+    }
+    return true;
 }
 
 fn spawnShell(
@@ -637,6 +739,45 @@ test "module cleanup paths use fire-and-forget teardown" {
     const source = @embedFile("module.zig");
     try std.testing.expect(std.mem.indexOf(u8, source, "Conpty.deinitSync") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "Conpty.deinit(") != null);
+}
+
+test "shutdown forcibly terminates captured conhost process" {
+    const source = @embedFile("conpty.zig");
+    try std.testing.expect(std.mem.indexOf(u8, source, "conhost_" ++ "process: c.HANDLE = c.INVALID_HANDLE_VALUE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "terminateProcessHandle(&state.conhost_" ++ "process)") != null);
+}
+
+test "createdConhostPid ignores unrelated new conhosts" {
+    if (!is_windows) return;
+
+    const existing = [_]ConhostProcess{
+        .{ .pid = 10, .parent_pid = 100 },
+    };
+    const current = [_]ConhostProcess{
+        .{ .pid = 10, .parent_pid = 100 },
+        .{ .pid = 20, .parent_pid = 200 },
+        .{ .pid = 30, .parent_pid = 100 },
+    };
+
+    try std.testing.expectEqual(
+        @as(?c.DWORD, 30),
+        createdConhostPid(&existing, &current, 100),
+    );
+}
+
+test "createdConhostPid refuses ambiguous owned conhosts" {
+    if (!is_windows) return;
+
+    const existing = [_]ConhostProcess{};
+    const current = [_]ConhostProcess{
+        .{ .pid = 20, .parent_pid = 100 },
+        .{ .pid = 30, .parent_pid = 100 },
+    };
+
+    try std.testing.expectEqual(
+        @as(?c.DWORD, null),
+        createdConhostPid(&existing, &current, 100),
+    );
 }
 
 test "notify CRT provider follows the CRT that owns Emacs dup" {
