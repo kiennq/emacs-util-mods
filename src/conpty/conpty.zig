@@ -49,6 +49,27 @@ const ConhostProcess = if (is_windows) struct {
     parent_pid: c.DWORD,
 } else struct {};
 
+const ResizeRequest = struct {
+    rows: u16,
+    cols: u16,
+};
+
+const ResizeQueue = struct {
+    pending: bool = false,
+    request: ResizeRequest = .{ .rows = 0, .cols = 0 },
+
+    fn push(self: *ResizeQueue, request: ResizeRequest) void {
+        self.pending = true;
+        self.request = request;
+    }
+
+    fn pop(self: *ResizeQueue) ?ResizeRequest {
+        if (!self.pending) return null;
+        self.pending = false;
+        return self.request;
+    }
+};
+
 fn notifyCrtProviderForImport(dll_name: []const u8, symbol_name: []const u8) ?NotifyCrtProvider {
     if (!std.mem.eql(u8, symbol_name, "_dup")) return null;
 
@@ -141,12 +162,16 @@ pub const State = if (is_windows) struct {
     shell_process: c.HANDLE = c.INVALID_HANDLE_VALUE,
     conhost_process: c.HANDLE = c.INVALID_HANDLE_VALUE,
     reader_thread: c.HANDLE = c.INVALID_HANDLE_VALUE,
+    resize_thread: c.HANDLE = c.INVALID_HANDLE_VALUE,
+    resize_event: c.HANDLE = c.INVALID_HANDLE_VALUE,
     notify_fd: c_int = -1,
     notify_crt: NotifyCrt,
     pending_lock: c.CRITICAL_SECTION = undefined,
+    resize_lock: c.CRITICAL_SECTION = undefined,
     output_buf: *[2][OUTPUT_BUFFER_SIZE]u8,
     pending_buf: *[PENDING_BUFFER_SIZE]u8,
     pending_len: usize = 0,
+    resize_queue: ResizeQueue = .{},
     running: std.atomic.Value(u8) = std.atomic.Value(u8).init(1),
 } else struct {};
 
@@ -186,14 +211,28 @@ pub fn init(
     state.shell_process = c.INVALID_HANDLE_VALUE;
     state.conhost_process = c.INVALID_HANDLE_VALUE;
     state.reader_thread = c.INVALID_HANDLE_VALUE;
+    state.resize_thread = c.INVALID_HANDLE_VALUE;
+    state.resize_event = c.INVALID_HANDLE_VALUE;
     state.notify_fd = -1;
     state.notify_crt = notify_crt;
     state.pending_len = 0;
+    state.resize_queue = .{};
     state.running = std.atomic.Value(u8).init(1);
 
     c.InitializeCriticalSection(&state.pending_lock);
     var pending_lock_initialized = true;
     errdefer if (pending_lock_initialized) c.DeleteCriticalSection(&state.pending_lock);
+
+    c.InitializeCriticalSection(&state.resize_lock);
+    var resize_lock_initialized = true;
+    errdefer if (resize_lock_initialized) c.DeleteCriticalSection(&state.resize_lock);
+
+    state.resize_event = c.CreateEventW(null, c.FALSE, c.FALSE, null) orelse return error.CreateResizeEventFailed;
+    var resize_event_owned_by_init = true;
+    errdefer if (resize_event_owned_by_init) {
+        _ = c.CloseHandle(state.resize_event);
+        state.resize_event = c.INVALID_HANDLE_VALUE;
+    };
 
     state.notify_fd = env.openChannel(process);
     if (state.notify_fd < 0) return error.OpenChannelFailed;
@@ -206,10 +245,21 @@ pub fn init(
     state_owned_by_init = false;
     arena_owned_by_init = false;
     pending_lock_initialized = false;
+    resize_lock_initialized = false;
+    resize_event_owned_by_init = false;
     notify_fd_owned_by_init = false;
     errdefer deinit(state);
 
     try spawnShell(state, env, shell_command, working_directory, environment_overrides, allocator);
+
+    state.resize_thread = c.CreateThread(
+        null,
+        0,
+        resizeThread,
+        state,
+        0,
+        null,
+    ) orelse return error.CreateResizeThreadFailed;
 
     state.reader_thread = c.CreateThread(
         null,
@@ -230,10 +280,18 @@ pub fn deinit(state_opt: ?*State) void {
     requestShutdown(state);
 
     if (state.reader_thread == c.INVALID_HANDLE_VALUE) {
+        if (state.resize_thread != c.INVALID_HANDLE_VALUE) {
+            startCleanupThread(state);
+            return;
+        }
         finalizeState(state);
         return;
     }
 
+    startCleanupThread(state);
+}
+
+fn startCleanupThread(state: *State) void {
     const cleanup_thread = c.CreateThread(
         null,
         0,
@@ -249,6 +307,7 @@ pub fn deinit(state_opt: ?*State) void {
 
 fn requestShutdown(state: *State) void {
     state.running.store(0, .release);
+    signalResizeWorker(state);
 
     terminateProcessHandle(&state.shell_process);
     terminateProcessHandle(&state.conhost_process);
@@ -256,11 +315,6 @@ fn requestShutdown(state: *State) void {
     if (state.pty_input != c.INVALID_HANDLE_VALUE) {
         _ = c.CloseHandle(state.pty_input);
         state.pty_input = c.INVALID_HANDLE_VALUE;
-    }
-
-    if (state.hpc != null) {
-        close_pseudo_console.?(state.hpc);
-        state.hpc = null;
     }
 
     if (state.reader_thread != c.INVALID_HANDLE_VALUE) {
@@ -278,6 +332,14 @@ fn waitForReaderThread(state: *State, timeout_ms: c.DWORD) bool {
     if (c.WaitForSingleObject(state.reader_thread, timeout_ms) != c.WAIT_OBJECT_0) return false;
     _ = c.CloseHandle(state.reader_thread);
     state.reader_thread = c.INVALID_HANDLE_VALUE;
+    return true;
+}
+
+fn waitForResizeThread(state: *State, timeout_ms: c.DWORD) bool {
+    if (state.resize_thread == c.INVALID_HANDLE_VALUE) return true;
+    if (c.WaitForSingleObject(state.resize_thread, timeout_ms) != c.WAIT_OBJECT_0) return false;
+    _ = c.CloseHandle(state.resize_thread);
+    state.resize_thread = c.INVALID_HANDLE_VALUE;
     return true;
 }
 
@@ -305,8 +367,19 @@ fn closeNotifyFd(state: *State) void {
 }
 
 fn finalizeState(state: *State) void {
+    if (state.hpc != null) {
+        close_pseudo_console.?(state.hpc);
+        state.hpc = null;
+    }
+
+    if (state.resize_event != c.INVALID_HANDLE_VALUE) {
+        _ = c.CloseHandle(state.resize_event);
+        state.resize_event = c.INVALID_HANDLE_VALUE;
+    }
+
     closeNotifyFd(state);
 
+    c.DeleteCriticalSection(&state.resize_lock);
     c.DeleteCriticalSection(&state.pending_lock);
     state.arena.deinit();
     std.heap.page_allocator.destroy(state);
@@ -314,7 +387,9 @@ fn finalizeState(state: *State) void {
 
 fn cleanupThread(param: ?*anyopaque) callconv(.winapi) c.DWORD {
     const state: *State = @ptrCast(@alignCast(param.?));
-    if (waitForReaderThread(state, c.INFINITE)) {
+    if (waitForReaderThread(state, c.INFINITE) and
+        waitForResizeThread(state, c.INFINITE))
+    {
         finalizeState(state);
     }
     return 0;
@@ -351,11 +426,9 @@ pub fn write(state: *State, data: []const u8) !void {
 
 pub fn resize(state: *State, rows: u16, cols: u16) bool {
     if (!is_windows) return false;
-    const size = c.COORD{
-        .X = @intCast(cols),
-        .Y = @intCast(rows),
-    };
-    return resize_pseudo_console.?(state.hpc, size) >= 0;
+    const queued = queueResize(state, .{ .rows = rows, .cols = cols });
+    if (queued) notify(state);
+    return queued;
 }
 
 pub fn isAlive(state: *State) bool {
@@ -380,6 +453,55 @@ fn initApi() !bool {
     resize_pseudo_console = @ptrCast(c.GetProcAddress(kernel32, "ResizePseudoConsole") orelse return false);
     close_pseudo_console = @ptrCast(c.GetProcAddress(kernel32, "ClosePseudoConsole") orelse return false);
     return true;
+}
+
+fn queueResize(state: *State, request: ResizeRequest) bool {
+    if (state.running.load(.acquire) == 0) return false;
+    if (state.resize_event == c.INVALID_HANDLE_VALUE) return false;
+
+    c.EnterCriticalSection(&state.resize_lock);
+    state.resize_queue.push(request);
+    c.LeaveCriticalSection(&state.resize_lock);
+
+    return c.SetEvent(state.resize_event) != 0;
+}
+
+fn takeResizeRequest(state: *State) ?ResizeRequest {
+    c.EnterCriticalSection(&state.resize_lock);
+    defer c.LeaveCriticalSection(&state.resize_lock);
+    return state.resize_queue.pop();
+}
+
+fn signalResizeWorker(state: *State) void {
+    if (state.resize_event != c.INVALID_HANDLE_VALUE) {
+        _ = c.SetEvent(state.resize_event);
+    }
+}
+
+fn resizeThread(param: ?*anyopaque) callconv(.winapi) c.DWORD {
+    const state: *State = @ptrCast(@alignCast(param.?));
+
+    while (state.running.load(.acquire) != 0) {
+        if (c.WaitForSingleObject(state.resize_event, c.INFINITE) != c.WAIT_OBJECT_0) break;
+        if (state.running.load(.acquire) == 0) break;
+
+        while (takeResizeRequest(state)) |request| {
+            if (state.running.load(.acquire) == 0) break;
+            _ = resizePseudoConsole(state, request);
+            notify(state);
+        }
+    }
+
+    return 0;
+}
+
+fn resizePseudoConsole(state: *State, request: ResizeRequest) bool {
+    if (state.hpc == null) return false;
+    const size = c.COORD{
+        .X = @intCast(request.cols),
+        .Y = @intCast(request.rows),
+    };
+    return resize_pseudo_console.?(state.hpc, size) >= 0;
 }
 
 fn createConpty(state: *State, rows: u16, cols: u16) !void {
@@ -812,6 +934,16 @@ test "notify channel avoids module CRT fd operations" {
     try std.testing.expect(std.mem.indexOf(u8, source, "c." ++ "_close") == null);
 }
 
+test "public resize queues work instead of resizing inline" {
+    const source = @embedFile("conpty.zig");
+    const resize_start = std.mem.indexOf(u8, source, "pub fn resize(").?;
+    const is_alive_start = std.mem.indexOfPos(u8, source, resize_start, "pub fn isAlive(").?;
+    const resize_body = source[resize_start..is_alive_start];
+
+    try std.testing.expect(std.mem.indexOf(u8, resize_body, "resize_pseudo_console") == null);
+    try std.testing.expect(std.mem.indexOf(u8, resize_body, "queueResize") != null);
+}
+
 test "buildEnvironmentBlockFromEntries treats bare overrides as unsets" {
     const base_path = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, "PATH=os");
     defer std.testing.allocator.free(base_path);
@@ -876,9 +1008,13 @@ test "deinit returns without waiting for the reader thread" {
     state.shell_process = c.INVALID_HANDLE_VALUE;
     state.notify_fd = -1;
     state.notify_crt = undefined;
+    state.resize_thread = c.INVALID_HANDLE_VALUE;
+    state.resize_event = c.INVALID_HANDLE_VALUE;
+    state.resize_queue = .{};
     state.pending_len = 0;
     state.running = std.atomic.Value(u8).init(1);
     c.InitializeCriticalSection(&state.pending_lock);
+    c.InitializeCriticalSection(&state.resize_lock);
     state.reader_thread = reader_thread;
 
     const start = std.time.nanoTimestamp();
