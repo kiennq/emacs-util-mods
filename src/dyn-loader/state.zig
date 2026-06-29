@@ -522,9 +522,9 @@ test "installCandidate stores module by module id" {
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
     defer reset();
@@ -532,8 +532,8 @@ test "installCandidate stores module by module id" {
     const module = try installCandidate(&candidate, null);
 
     try std.testing.expectEqualStrings("sample-module", module.module_id);
-    try std.testing.expectEqualStrings("C:/ghostel/ghostel-module.json", module.manifest_path);
-    try std.testing.expectEqualStrings("C:/ghostel/sample-module.dll", module.live_state.?.target_path);
+    try std.testing.expectEqualStrings("fixtures/ghostel-module.json", module.manifest_path);
+    try std.testing.expectEqualStrings("fixtures/sample-module", module.live_state.?.target_path);
     try std.testing.expectEqual(module, moduleForId("sample-module").?);
 }
 
@@ -563,9 +563,9 @@ test "installCandidate replaces existing module live state for reload" {
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
     defer reset();
@@ -585,16 +585,16 @@ test "installCandidate replaces existing module live state for reload" {
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module-next.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module-next.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module-next"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module-next.load"),
         .loader_abi = 1,
     };
     const reloaded = try installCandidate(&second, null);
 
     try std.testing.expectEqual(module, reloaded);
-    try std.testing.expectEqualStrings("C:/ghostel/ghostel-module-next.json", reloaded.manifest_path);
-    try std.testing.expectEqualStrings("C:/ghostel/sample-module-next.dll", reloaded.live_state.?.target_path);
+    try std.testing.expectEqualStrings("fixtures/ghostel-module-next.json", reloaded.manifest_path);
+    try std.testing.expectEqualStrings("fixtures/sample-module-next", reloaded.live_state.?.target_path);
     try std.testing.expectEqualStrings("1.1", std.mem.span(reloaded.live_state.?.generic_manifest.module_version));
 }
 
@@ -613,9 +613,9 @@ test "candidate cleanup hook runs when discarded before install" {
         .library = null,
         .generic_manifest = std.mem.zeroes(abi.GenericManifest),
         .cleanup = &recordCleanup,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
     candidate.deinit(null);
@@ -652,9 +652,9 @@ test "module cleanup hook runs on unload and before replacement" {
             .set_variable = undefined,
         },
         .cleanup = &recordCleanup,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
     defer reset();
@@ -674,9 +674,9 @@ test "module cleanup hook runs on unload and before replacement" {
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module-next.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module-next.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module-next"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module-next.load"),
         .loader_abi = 1,
     };
     _ = try installCandidate(&second, null);
@@ -699,9 +699,9 @@ test "module cleanup hook runs on unload and before replacement" {
             .set_variable = undefined,
         },
         .cleanup = &recordCleanup,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module-third.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-third.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-third.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module-third.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module-third"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module-third.load"),
         .loader_abi = 1,
     };
     _ = try installCandidate(&third, null);
@@ -807,9 +807,9 @@ test "module slot unload preserves stable identity and manifest path" {
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
     defer reset();
@@ -821,7 +821,7 @@ test "module slot unload preserves stable identity and manifest path" {
 
     try std.testing.expectEqual(module, moduleForId("sample-module").?);
     try std.testing.expectEqualStrings("sample-module", module.module_id);
-    try std.testing.expectEqualStrings("C:/ghostel/ghostel-module.json", module.manifest_path);
+    try std.testing.expectEqualStrings("fixtures/ghostel-module.json", module.manifest_path);
     try std.testing.expect(!module.isLoaded());
     try std.testing.expectEqual(@as(usize, 1), module.bindings.items.len);
     try std.testing.expectEqual(module, binding.slot);
@@ -853,9 +853,9 @@ test "installCandidate reuses an unloaded module slot" {
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
     defer reset();
@@ -877,9 +877,9 @@ test "installCandidate reuses an unloaded module slot" {
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module-next.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module-next.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module-next.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module-next"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module-next.load"),
         .loader_abi = 1,
     };
 
@@ -887,7 +887,7 @@ test "installCandidate reuses an unloaded module slot" {
 
     try std.testing.expectEqual(module, reloaded);
     try std.testing.expect(reloaded.isLoaded());
-    try std.testing.expectEqualStrings("C:/ghostel/ghostel-module-next.json", reloaded.manifest_path);
+    try std.testing.expectEqualStrings("fixtures/ghostel-module-next.json", reloaded.manifest_path);
     try std.testing.expectEqualStrings("1.1", std.mem.span(reloaded.live_state.?.generic_manifest.module_version));
 }
 
@@ -917,9 +917,9 @@ test "functionHandle reuses stable callback data for the same Lisp export contra
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
     defer reset();
@@ -959,9 +959,9 @@ test "functionHandle keeps incompatible arity contracts distinct" {
             .set_variable = undefined,
         },
         .cleanup = null,
-        .manifest_path = try std.testing.allocator.dupe(u8, "C:/ghostel/ghostel-module.json"),
-        .target_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll"),
-        .load_path = try std.testing.allocator.dupe(u8, "C:/ghostel/sample-module.dll.load"),
+        .manifest_path = try std.testing.allocator.dupe(u8, "fixtures/ghostel-module.json"),
+        .target_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module"),
+        .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
     defer reset();

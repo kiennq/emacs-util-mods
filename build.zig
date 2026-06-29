@@ -12,33 +12,25 @@ pub const EmacsIncludeSource = union(enum) {
 const ModuleSpec = struct {
     name: []const u8,
     dir: []const u8,
-    platform: Platform = .any,
-
-    const Platform = enum {
-        any,
-        windows,
-    };
 };
 
 const module_specs = [_]ModuleSpec{
     .{ .name = "dyn-loader", .dir = "src/dyn-loader" },
-    .{ .name = "conpty", .dir = "src/conpty", .platform = .windows },
 };
 
 pub fn build(b: *std.Build) void {
-    const default_target: std.Target.Query = if (builtin.os.tag == .windows)
-        .{
+    const default_target: std.Target.Query = switch (builtin.os.tag) {
+        .windows => .{
             .cpu_arch = builtin.cpu.arch,
             .os_tag = .windows,
             .abi = .gnu,
-        }
-    else
-        .{};
+        },
+        else => .{},
+    };
     const target = b.standardTargetOptions(.{
         .default_target = default_target,
     });
     const optimize = b.standardOptimizeOption(.{});
-    const target_os = target.result.os.tag;
 
     _ = resolveEmacsIncludePath(b);
 
@@ -59,7 +51,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_root_tests.step);
 
     for (module_specs) |module_spec| {
-        if (!moduleSupportsTarget(module_spec, target_os)) continue;
         addModuleSteps(b, module_spec, install_step, check_step, test_step);
     }
 }
@@ -143,13 +134,6 @@ fn addModuleCommand(
     return run;
 }
 
-fn moduleSupportsTarget(module_spec: ModuleSpec, target_os: std.Target.Os.Tag) bool {
-    return switch (module_spec.platform) {
-        .any => true,
-        .windows => target_os == .windows,
-    };
-}
-
 fn generateEmacsModuleHeader(allocator: std.mem.Allocator, source_dir: []const u8) ![]u8 {
     const src_dir = try std.fs.path.join(allocator, &.{ source_dir, "src" });
     defer allocator.free(src_dir);
@@ -230,15 +214,15 @@ fn pathExistsRelative(path: []const u8) bool {
 }
 
 test "emacs include resolution prefers include dir override" {
-    const source = resolveEmacsIncludeSource("C:/headers", "Q:/repos/emacs-build/git/master");
+    const source = resolveEmacsIncludeSource("fixtures/headers", "fixtures/emacs-source");
     try std.testing.expect(source == .include_dir);
-    try std.testing.expectEqualStrings("C:/headers", source.include_dir);
+    try std.testing.expectEqualStrings("fixtures/headers", source.include_dir);
 }
 
 test "emacs include resolution prefers source dir over vendored header" {
-    const source = resolveEmacsIncludeSource(null, "Q:/repos/emacs-build/git/master");
+    const source = resolveEmacsIncludeSource(null, "fixtures/emacs-source");
     try std.testing.expect(source == .source_dir);
-    try std.testing.expectEqualStrings("Q:/repos/emacs-build/git/master", source.source_dir);
+    try std.testing.expectEqualStrings("fixtures/emacs-source", source.source_dir);
 }
 
 test "emacs include resolution falls back to vendored header" {
@@ -247,13 +231,6 @@ test "emacs include resolution falls back to vendored header" {
 }
 
 test "dyn-loader stays enabled on non-Windows targets" {
-    try std.testing.expect(moduleSupportsTarget(module_specs[0], .linux));
-    try std.testing.expect(moduleSupportsTarget(module_specs[0], .macos));
-    try std.testing.expect(moduleSupportsTarget(module_specs[0], .windows));
-}
-
-test "conpty is only enabled on Windows targets" {
-    try std.testing.expect(moduleSupportsTarget(module_specs[1], .windows));
-    try std.testing.expect(!moduleSupportsTarget(module_specs[1], .linux));
-    try std.testing.expect(!moduleSupportsTarget(module_specs[1], .macos));
+    try std.testing.expectEqual(@as(usize, 1), module_specs.len);
+    try std.testing.expectEqualStrings("dyn-loader", module_specs[0].name);
 }

@@ -9,10 +9,9 @@
 - per-module packaging under `src/<module>/`
 - shared CI/release automation
 
-Current modules:
+Current module:
 
 - `src/dyn-loader/` - cross-platform loader that can reload a target Emacs module into a live Emacs session
-- `src/conpty/` - Windows-only ConPTY shim that exposes a PTY-like interface to Emacs
 
 The root `build.zig` is the top-level orchestrator. Each module also has its own standalone `build.zig`, and the root build delegates into those module-local builds instead of rebuilding everything in one giant script.
 
@@ -38,16 +37,10 @@ Standalone module builds are expected to keep working from each module directory
   - `zig build`
   - `zig build check`
   - `zig build test`
-- `conpty`
-  - `cd src/conpty`
-  - `zig build`
-  - `zig build check`
-  - `zig build test`
 
 You can also invoke a module build from the repo root:
 
 - `zig build --build-file src/dyn-loader/build.zig test`
-- `zig build --build-file src/conpty/build.zig test`
 
 ### Formatting
 
@@ -64,7 +57,7 @@ If you only changed a few files, format just those files instead of broad rewrit
 `build.zig` owns:
 
 - the shared Emacs header resolution helpers
-- the target-aware module list (`dyn-loader` always, `conpty` only on Windows)
+- the target-aware module list
 - the top-level `install`, `check`, and `test` steps
 - root-level tests for build logic
 
@@ -102,12 +95,6 @@ If `EMACS_SOURCE_DIR` is set, the build generates `emacs-module.h` from upstream
   - its own `src/<module>/build.zig`
   - CI/release workflow matrices as needed
   - a module README
-
-### `conpty`
-
-- Windows only.
-- Do not wire `conpty` into non-Windows root targets or non-Windows CI jobs.
-- The provided Emacs feature is `conpty-module`.
 
 ### `dyn-loader`
 
@@ -209,15 +196,6 @@ After editing any `.zig` file:
   - Emacs `29.4`
   - Ubuntu and Windows runners
 
-### Generic smoke-load test
-
-1. Build the module:
-   - `zig build --build-file src/conpty/build.zig -Doptimize=ReleaseSafe install`
-2. Load it in batch Emacs:
-   - `emacs --batch -Q -l test/smoke-load.el -- src/conpty/zig-out/bin/conpty-module.dll conpty-module`
-
-For `dyn-loader` on Unix, the module path uses the platform extension in `src/dyn-loader/zig-out/bin/` (`.so` on Linux, `.dylib` on macOS).
-
 ### `dyn-loader` lifecycle test
 
 This is the deeper integration test for unload/reload safety.
@@ -243,7 +221,6 @@ Release behavior is defined in `.github/workflows/release.yml`.
 - Release assets are uploaded as raw module binaries, not zip files.
 - Asset names include architecture, for example:
   - `dyn-loader-module-x86_64.so`
-  - `conpty-module-x86_64.dll`
 
 When touching release logic, preserve the current assumptions:
 
@@ -257,4 +234,3 @@ Prefer the repo's existing docs before inventing new behavior:
 
 - `README.md` for top-level layout, header resolution, and release model
 - `src/dyn-loader/README.md` for loader purpose and manifest format
-- `src/conpty/README.md` for the Windows PTY shim contract

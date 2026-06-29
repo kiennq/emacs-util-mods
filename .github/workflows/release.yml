@@ -96,11 +96,6 @@ jobs:
             binary_name: dyn-loader-module.dll
             arch: x86_64
             asset_name: dyn-loader-module-x86_64.dll
-          - os: windows-latest
-            module: conpty
-            binary_name: conpty-module.dll
-            arch: x86_64
-            asset_name: conpty-module-x86_64.dll
 
     steps:
       - name: Checkout

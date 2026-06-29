@@ -8,14 +8,14 @@ const EmacsIncludeSource = union(enum) {
 };
 
 pub fn build(b: *std.Build) void {
-    const default_target: std.Target.Query = if (builtin.os.tag == .windows)
-        .{
+    const default_target: std.Target.Query = switch (builtin.os.tag) {
+        .windows => .{
             .cpu_arch = builtin.cpu.arch,
             .os_tag = .windows,
             .abi = .gnu,
-        }
-    else
-        .{};
+        },
+        else => .{},
+    };
     const target = b.standardTargetOptions(.{
         .default_target = default_target,
     });
@@ -48,10 +48,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .root_module = loader_mod,
     });
-    addLoaderRuntimeLibraries(loader_lib, target_os);
-    if (target_os == .windows) {
-        addWindowsRuntimeLibraries(b, loader_lib, target.result);
-    }
+    addLoaderRuntimeLibraries(b, loader_lib, target.result);
     b.installArtifact(loader_lib);
     const copy_loader = b.addInstallFile(
         loader_lib.getEmittedBin(),
@@ -86,10 +83,7 @@ pub fn build(b: *std.Build) void {
     const loader_tests = b.addTest(.{
         .root_module = loader_test_mod,
     });
-    addLoaderRuntimeLibraries(loader_tests, target_os);
-    if (target_os == .windows) {
-        addWindowsRuntimeLibraries(b, loader_tests, target.result);
-    }
+    addLoaderRuntimeLibraries(b, loader_tests, target.result);
 
     const run_loader_tests = b.addRunArtifact(loader_tests);
     const test_step = b.step("test", "Run dyn-loader Zig unit tests");
@@ -204,43 +198,33 @@ fn pathExistsAbsolute(path: []const u8) bool {
     return true;
 }
 
-fn addWindowsRuntimeLibraries(
+fn addLoaderRuntimeLibraries(
     b: *std.Build,
-    lib: *std.Build.Step.Compile,
+    step: *std.Build.Step.Compile,
     resolved_target: std.Target,
 ) void {
-    lib.linkSystemLibrary("kernel32");
-    if (resolved_target.abi != .msvc) return;
+    switch (resolved_target.os.tag) {
+        .windows => {
+            step.linkSystemLibrary("kernel32");
+            switch (resolved_target.abi) {
+                .msvc => {
+                    step.linkSystemLibrary("libvcruntime");
 
-    lib.linkSystemLibrary("libvcruntime");
-
-    const arch = resolved_target.cpu.arch;
-    const sdk = std.zig.WindowsSdk.find(b.allocator, arch) catch null;
-    if (sdk) |s| {
-        if (s.windows10sdk) |w10| {
-            const arch_str: []const u8 = switch (arch) {
-                .x86_64 => "x64",
-                .x86 => "x86",
-                .aarch64 => "arm64",
-                else => "x64",
-            };
-            const ucrt_lib_path = std.fmt.allocPrint(
-                b.allocator,
-                "{s}\\Lib\\{s}\\ucrt\\{s}",
-                .{ w10.path, w10.version, arch_str },
-            ) catch null;
-
-            if (ucrt_lib_path) |path| {
-                lib.addLibraryPath(.{ .cwd_relative = path });
+                    var libc = std.zig.LibCInstallation.findNative(.{
+                        .allocator = b.allocator,
+                        .verbose = false,
+                        .target = &resolved_target,
+                    }) catch null;
+                    if (libc) |*installation| {
+                        defer installation.deinit(b.allocator);
+                        if (installation.crt_dir) |crt_dir| {
+                            step.addLibraryPath(.{ .cwd_relative = crt_dir });
+                        }
+                    }
+                },
+                else => {},
             }
-        }
-    }
-
-    lib.linkSystemLibrary("libucrt");
-}
-
-fn addLoaderRuntimeLibraries(step: *std.Build.Step.Compile, target_os: std.Target.Os.Tag) void {
-    switch (target_os) {
+        },
         .linux, .freebsd, .netbsd, .openbsd, .dragonfly, .solaris => step.linkSystemLibrary("dl"),
         else => {},
     }
@@ -255,15 +239,15 @@ fn loaderModuleOutputName(target_os: std.Target.Os.Tag) []const u8 {
 }
 
 test "emacs include resolution prefers include dir override" {
-    const source = resolveEmacsIncludeSource("C:/headers", "Q:/repos/emacs-build/git/master");
+    const source = resolveEmacsIncludeSource("fixtures/headers", "fixtures/emacs-source");
     try std.testing.expect(source == .include_dir);
-    try std.testing.expectEqualStrings("C:/headers", source.include_dir);
+    try std.testing.expectEqualStrings("fixtures/headers", source.include_dir);
 }
 
 test "emacs include resolution prefers source dir over vendored header" {
-    const source = resolveEmacsIncludeSource(null, "Q:/repos/emacs-build/git/master");
+    const source = resolveEmacsIncludeSource(null, "fixtures/emacs-source");
     try std.testing.expect(source == .source_dir);
-    try std.testing.expectEqualStrings("Q:/repos/emacs-build/git/master", source.source_dir);
+    try std.testing.expectEqualStrings("fixtures/emacs-source", source.source_dir);
 }
 
 test "emacs include resolution falls back to vendored header" {

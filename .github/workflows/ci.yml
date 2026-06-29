@@ -17,8 +17,6 @@ jobs:
             module: dyn-loader
           - os: windows-latest
             module: dyn-loader
-          - os: windows-latest
-            module: conpty
 
     steps:
       - name: Checkout
@@ -36,8 +34,8 @@ jobs:
           $buildFile = Join-Path $moduleDir 'build.zig'
           zig build --build-file $buildFile -Doptimize=ReleaseSafe test
 
-  smoke-load:
-    name: ${{ matrix.module }} on ${{ matrix.os }}
+  dyn-loader-lifecycle:
+    name: dyn-loader lifecycle on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -46,15 +44,9 @@ jobs:
           - os: ubuntu-latest
             module: dyn-loader
             binary_name: dyn-loader-module.so
-            feature: dyn-loader-module
           - os: windows-latest
             module: dyn-loader
             binary_name: dyn-loader-module.dll
-            feature: dyn-loader-module
-          - os: windows-latest
-            module: conpty
-            binary_name: conpty-module.dll
-            feature: conpty-module
 
     steps:
       - name: Checkout
@@ -85,7 +77,6 @@ jobs:
           zig build --build-file $buildFile -Doptimize=ReleaseSafe install
 
       - name: Build dyn-loader fixtures
-        if: matrix.module == 'dyn-loader'
         shell: pwsh
         run: |
           $fixtureDir = Join-Path $env:RUNNER_TEMP 'dyn-loader-fixtures'
@@ -93,7 +84,6 @@ jobs:
           & $script -OutputDir $fixtureDir
 
       - name: Verify dyn-loader lifecycle in Emacs
-        if: matrix.module == 'dyn-loader'
         shell: pwsh
         run: |
           $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
@@ -106,12 +96,3 @@ jobs:
           $v3Path = Join-Path $fixtureDir "fixture-v3$extension"
           $testFile = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'test') 'dyn-loader-lifecycle.el'
           emacs --batch -Q -l $testFile -- $modulePath $manifestPath $livePath $v2Path $v3Path
-
-      - name: Smoke-load module in Emacs
-        if: matrix.module != 'dyn-loader'
-        shell: pwsh
-        run: |
-          $moduleDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'src') '${{ matrix.module }}'
-          $modulePath = Join-Path (Join-Path (Join-Path $moduleDir 'zig-out') 'bin') '${{ matrix.binary_name }}'
-          $testFile = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'test') 'smoke-load.el'
-          emacs --batch -Q -l $testFile -- $modulePath '${{ matrix.feature }}'

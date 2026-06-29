@@ -11,8 +11,7 @@ Emacs module header handling, build conventions, and release packaging.
 - `include/emacs-module.h` - vendored fallback header used when no local Emacs
   headers are configured
 - `src/dyn-loader/` - cross-platform dynamic loader module package
-- `src/conpty/` - Windows-only ConPTY helper module package
-- `test/support/` - shared test helper area for cross-module fixtures and helpers
+- `test/support/` - shared test helper area for fixtures and helpers
 
 ## Building
 
@@ -23,8 +22,7 @@ packages that are valid for the selected target.
 - `zig build check` - compile-check the root build logic and supported modules
 - `zig build test` - run root build-script tests and supported module tests
 
-`dyn-loader` is always available. `conpty` is only wired into the root build
-when the selected target OS is Windows.
+`dyn-loader` is always available through the root build.
 
 Emacs header resolution matches Ghostel:
 
@@ -48,5 +46,4 @@ The release base version lives in `VERSION`. Published release versions use the
 format `<base>.<run_number>.<sha7>`, with tags created as
 `v<base>.<run_number>.<sha7>`. Release assets are uploaded directly as raw
 module binaries (`.so` / `.dll`) per build matrix entry, named with the target
-architecture such as `dyn-loader-module-x86_64.so` and
-`conpty-module-x86_64.dll`.
+architecture such as `dyn-loader-module-x86_64.so`.

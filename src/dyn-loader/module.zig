@@ -485,13 +485,13 @@ test "loader manifest json uses module_path" {
     const parsed = try std.json.parseFromSlice(
         LoaderManifestJson,
         std.testing.allocator,
-        "{\"loader_abi\":1,\"module_path\":\"sample-module.dll\"}",
+        "{\"loader_abi\":1,\"module_path\":\"fixtures/sample-module\"}",
         .{},
     );
     defer parsed.deinit();
 
     try std.testing.expectEqual(@as(u32, 1), parsed.value.loader_abi);
-    try std.testing.expectEqualStrings("sample-module.dll", parsed.value.module_path);
+    try std.testing.expectEqualStrings("fixtures/sample-module", parsed.value.module_path);
 }
 
 test "loader registers retired shadow cleanup hook" {
