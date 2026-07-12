@@ -117,7 +117,7 @@ fn forwardGenericExport(raw_env: ?*c.emacs_env, nargs: isize, args: [*c]c.emacs_
         return env.nil();
     };
     const result = generation.generic_manifest.invoke(descriptor.export_id, raw_env, nargs, args, null);
-    if (env.nonLocalExitCheck() == c.emacs_funcall_exit_return) {
+    if (env.raw.non_local_exit_check.?(env.raw) == c.emacs_funcall_exit_return) {
         state.trackReturnedUserPointer(
             env,
             object_generations orelse return env.nil(),

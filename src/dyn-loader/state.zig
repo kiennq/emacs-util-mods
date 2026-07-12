@@ -258,6 +258,13 @@ fn nextGenerationId() u64 {
     return id;
 }
 
+fn isUserPointer(env: emacs.Env, value: emacs.c.emacs_value) bool {
+    const predicate = env.raw.intern.?(env.raw, "user-ptrp");
+    var args = [_]emacs.c.emacs_value{value};
+    const result = env.raw.funcall.?(env.raw, predicate, args.len, &args);
+    return env.raw.is_not_nil.?(env.raw, result);
+}
+
 pub fn cleanupRetiredLoadPaths() usize {
     var removed: usize = 0;
     for (loaded_module_order.items) |module| {
@@ -274,7 +281,7 @@ pub fn trackReturnedUserPointer(
     value: emacs.c.emacs_value,
     generation: *LiveModuleState,
 ) void {
-    if (!env.isUserPtr(value)) return;
+    if (!isUserPointer(env, value)) return;
     if (env.isNotNil(env.f("gethash", .{ value, object_generations }))) return;
     _ = env.f(
         "puthash",
@@ -296,7 +303,7 @@ pub fn generationChoiceForArguments(
 ) GenerationChoice {
     var selected_id: ?u64 = null;
     for (args) |arg| {
-        if (!env.isUserPtr(arg)) continue;
+        if (!isUserPointer(env, arg)) continue;
         const generation_value = env.f("gethash", .{ arg, object_generations });
         if (!env.isNotNil(generation_value)) continue;
         const generation_id: u64 = @intCast(env.extractInteger(generation_value));

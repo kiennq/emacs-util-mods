@@ -109,10 +109,6 @@ pub const Env = struct {
         return @ptrCast(@alignCast(raw_ptr));
     }
 
-    pub fn isUserPtr(self: Env, val: Value) bool {
-        return self.isNotNil(self.funcall(self.intern("user-ptrp"), &.{val}));
-    }
-
     // --- Type extraction ---
 
     pub fn extractInteger(self: Env, val: Value) i64 {
