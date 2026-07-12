@@ -14,6 +14,22 @@ At runtime it:
 This lets you rebuild a native module, load it again through `dyn-loader`, and
 continue testing from the same Emacs instance.
 
+## Reloaded native objects
+
+Direct module user pointers returned by an exported function are associated
+with the DLL generation that created them in a weak identity table.  Later
+exported calls receiving one of those pointers are dispatched to its owning
+generation, while calls without generation-owned arguments use the current
+generation.  Tracking the Lisp object rather than its raw pointer also
+preserves ownership if a module changes the pointer, including to or from
+null.  This prevents a newly loaded implementation from interpreting an older
+generation's native object.
+
+The loader does not replace the user-pointer finalizer or raw pointer, and it
+keeps retired DLL generations mapped.  It cannot infer ownership for pointers
+hidden inside lists, vectors, integers, closures, or module-private callback
+registrations.
+
 ## Building
 
 Run the standalone package build from this directory:

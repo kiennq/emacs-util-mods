@@ -10,9 +10,17 @@
        (live-path (nth 2 command-line-args-left))
        (v2-path (nth 3 command-line-args-left))
        (v3-path (nth 4 command-line-args-left))
+       (passthrough-manifest-path
+        (expand-file-name "fixture-passthrough-manifest.json"
+                          (file-name-directory manifest-path)))
        (module-id nil)
-       (old-fn nil))
-  (dolist (path (list module-path manifest-path live-path v2-path v3-path))
+       (passthrough-module-id nil)
+       (old-fn nil)
+       (old-object nil)
+       (null-object nil)
+       (new-object nil))
+  (dolist (path (list module-path manifest-path live-path v2-path v3-path
+                      passthrough-manifest-path))
     (unless (file-exists-p path)
       (error "test input does not exist: %s" path)))
 
@@ -39,15 +47,8 @@
     (error "module id still present after unload: %S" dyn-loader-loaded-modules))
   (unless (= dyn-loader-test-value 10)
     (error "expected variable snapshot value 10 after unload"))
-  (condition-case err
-      (progn
-        (funcall old-fn)
-        (error "expected unload to invalidate stale function"))
-    (error
-     (unless (string-match-p
-              (regexp-quote "dyn-loader: module 'dyn-loader-test' is unloaded")
-              (error-message-string err))
-       (signal (car err) (cdr err)))))
+  (unless (null (funcall old-fn))
+    (error "expected unloaded stale function to return nil"))
 
   (copy-file v2-path live-path t)
   (dyn-loader-reload module-id)
@@ -57,11 +58,34 @@
     (error "expected compatible reload to retarget stale function"))
   (unless (= dyn-loader-test-value 20)
     (error "expected reloaded variable value 20"))
+  (setq old-object (dyn-loader-test-make-object))
+  (setq null-object (dyn-loader-test-make-null-object))
+  (setq passthrough-module-id
+        (dyn-loader-load-manifest passthrough-manifest-path))
+  (unless (equal passthrough-module-id "dyn-loader-passthrough")
+    (error "unexpected passthrough module id: %S" passthrough-module-id))
+  (setq old-object (dyn-loader-test-pass-through old-object))
+  (unless (module-load module-path)
+    (error "reloading dyn-loader module returned nil"))
 
   (copy-file v3-path live-path t)
   (dyn-loader-reload module-id)
   (unless (= dyn-loader-test-value 30)
     (error "expected variable value 30 after incompatible reload"))
+  (unless (= (dyn-loader-test-object-call old-object) 2)
+    (error "expected old object to dispatch through generation 2"))
+  (let ((failures nil))
+    (unless (= (dyn-loader-test-replace-object old-object) 2)
+      (push "expected pointer replacement through generation 2" failures))
+    (unless (= (dyn-loader-test-object-call old-object) 2)
+      (push "expected replaced object to remain with generation 2" failures))
+    (unless (= (dyn-loader-test-object-call null-object) 2)
+      (push "expected null object to remain with generation 2" failures))
+    (when failures
+      (error "%s" (string-join (nreverse failures) "; "))))
+  (setq new-object (dyn-loader-test-make-object))
+  (unless (= (dyn-loader-test-object-call new-object) 3)
+    (error "expected new object to dispatch through generation 3"))
   (condition-case err
       (progn
         (funcall old-fn)

@@ -6,6 +6,7 @@ const state = @import("state.zig");
 const c = emacs.c;
 export const plugin_is_GPL_compatible: c_int = 1;
 const emacs_variadic_function: i32 = c.emacs_variadic_function;
+var object_generations: ?c.emacs_value = null;
 
 const LoaderManifestJson = struct {
     loader_abi: u32,
@@ -59,14 +60,14 @@ fn arityMatches(handle: *const state.FunctionHandle, descriptor: *const state.Ex
     return descriptor.max_arity >= handle.max_arity;
 }
 
-fn currentFunctionExport(slot: *const state.ModuleSlot, handle: *const state.FunctionHandle) ?*const state.ExportState {
-    if (slot.live_state) |*live_state| {
-        const descriptor = live_state.exports_by_name.getPtr(handle.lisp_name) orelse return null;
-        if (descriptor.kind != @intFromEnum(abi.ExportKind.function)) return null;
-        if (!arityMatches(handle, descriptor)) return null;
-        return descriptor;
-    }
-    return null;
+fn generationFunctionExport(
+    generation: *const state.LiveModuleState,
+    handle: *const state.FunctionHandle,
+) ?*const state.ExportState {
+    const descriptor = generation.exports_by_name.getPtr(handle.lisp_name) orelse return null;
+    if (descriptor.kind != @intFromEnum(abi.ExportKind.function)) return null;
+    if (!arityMatches(handle, descriptor)) return null;
+    return descriptor;
 }
 
 fn signalDynamicExportError(env: emacs.Env, comptime fmt: []const u8, args: anytype) void {
@@ -82,14 +83,29 @@ fn forwardGenericExport(raw_env: ?*c.emacs_env, nargs: isize, args: [*c]c.emacs_
         return env.nil();
     };
     const binding: *const state.FunctionHandle = @ptrCast(@alignCast(raw_binding));
-    const live_state = if (binding.slot.live_state) |*live_state|
-        live_state
-    else {
-        signalDynamicExportError(env, "dyn-loader: module '{s}' is unloaded", .{binding.slot.module_id});
-        return env.nil();
+    const args_slice: []const c.emacs_value = if (nargs == 0)
+        &.{}
+    else
+        args[0..@intCast(nargs)];
+    const choice = state.generationChoiceForArguments(
+        env,
+        binding.slot,
+        object_generations orelse return env.nil(),
+        args_slice,
+    );
+    const generation, const object_owned = switch (choice) {
+        .current => .{ binding.slot.live_state orelse return env.nil(), false },
+        .generation_id => |id| .{
+            binding.slot.generationById(id) orelse return env.nil(),
+            true,
+        },
+        .conflict => return env.nil(),
     };
-    const descriptor = currentFunctionExport(binding.slot, binding) orelse {
-        if (live_state.exports_by_name.get(binding.lisp_name)) |current| {
+    if (generation.status == .disabled) return env.nil();
+
+    const descriptor = generationFunctionExport(generation, binding) orelse {
+        if (object_owned) return env.nil();
+        if (generation.exports_by_name.get(binding.lisp_name)) |current| {
             if (current.kind != @intFromEnum(abi.ExportKind.function)) {
                 signalDynamicExportError(env, "dyn-loader: export '{s}' is no longer available", .{binding.lisp_name});
             } else {
@@ -100,7 +116,16 @@ fn forwardGenericExport(raw_env: ?*c.emacs_env, nargs: isize, args: [*c]c.emacs_
         }
         return env.nil();
     };
-    return live_state.generic_manifest.invoke(descriptor.export_id, raw_env, nargs, args, null);
+    const result = generation.generic_manifest.invoke(descriptor.export_id, raw_env, nargs, args, null);
+    if (env.nonLocalExitCheck() == c.emacs_funcall_exit_return) {
+        state.trackReturnedUserPointer(
+            env,
+            object_generations orelse return env.nil(),
+            result,
+            generation,
+        );
+    }
+    return result;
 }
 
 fn clearInstalledTrampoline(env: emacs.Env, function_symbol: c.emacs_value) void {
@@ -128,13 +153,13 @@ fn registerGenericFunction(env: emacs.Env, module: *state.ModuleSlot, descriptor
 }
 
 fn registerGenericVariable(env: emacs.Env, module: *state.ModuleSlot, descriptor: *const abi.ExportDescriptor) void {
-    const live_state = if (module.live_state) |*live_state| live_state else unreachable;
+    const live_state = module.live_state orelse unreachable;
     const value = live_state.generic_manifest.get_variable(descriptor.export_id, env.raw, null);
     _ = env.f("set", .{ env.intern(descriptor.lisp_name), value });
 }
 
 fn registerGenericExports(env: emacs.Env, module: *state.ModuleSlot) !void {
-    const live_state = if (module.live_state) |*live_state| live_state else unreachable;
+    const live_state = module.live_state orelse unreachable;
     for (live_state.generic_manifest.exports[0..live_state.generic_manifest.exports_len]) |*descriptor| {
         switch (descriptor.kind) {
             @intFromEnum(abi.ExportKind.function) => try registerGenericFunction(env, module, descriptor),
@@ -290,7 +315,10 @@ fn fnLoaderUnload(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: 
         return env.nil();
     };
 
-    module.unload(env.raw);
+    module.unload(env.raw) catch |err| {
+        signalValidationError(env, "dyn-loader: failed to unload module: {s}", .{@errorName(err)});
+        return env.nil();
+    };
     updateLoadedModulesVariable(env);
     return env.t();
 }
@@ -305,6 +333,17 @@ export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int
 
     const raw_env = runtime.get_environment.?(runtime);
     const env = emacs.Env.init(raw_env);
+    if (object_generations == null) {
+        object_generations = env.makeGlobalRef(env.f(
+            "make-hash-table",
+            .{
+                env.intern(":test"),
+                env.intern("eq"),
+                env.intern(":weakness"),
+                env.intern("key"),
+            },
+        ));
+    }
 
     env.bindFunction(
         "dyn-loader-load-manifest",

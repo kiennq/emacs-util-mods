@@ -23,85 +23,11 @@ pub const FunctionHandle = struct {
     }
 };
 
-const RetiredLiveModule = struct {
-    library: ?dynlib.Library,
-    target_path: []u8,
-    load_path: []u8,
-
-    fn cleanupLoadFile(self: *RetiredLiveModule) bool {
-        if (self.load_path.len == 0) return false;
-        if (!cleanupLoadPath(self.load_path, self.target_path)) return false;
-
-        const allocator = std.heap.page_allocator;
-        allocator.free(self.target_path);
-        allocator.free(self.load_path);
-        self.target_path = &[_]u8{};
-        self.load_path = &[_]u8{};
-        return true;
-    }
-
-    fn closeForReset(self: *RetiredLiveModule) void {
-        if (self.library) |*library| {
-            library.close();
-            self.library = null;
-        }
-        _ = self.cleanupLoadFile();
-        const allocator = std.heap.page_allocator;
-        if (self.target_path.len != 0) allocator.free(self.target_path);
-        if (self.load_path.len != 0) allocator.free(self.load_path);
-        allocator.destroy(self);
-    }
+pub const GenerationStatus = enum {
+    active,
+    retired,
+    disabled,
 };
-
-var retired_live_modules: std.ArrayListUnmanaged(*RetiredLiveModule) = .{};
-
-fn retainLiveModule(library: ?dynlib.Library, target_path: []const u8, load_path: []const u8) void {
-    const allocator = std.heap.page_allocator;
-    const retired = allocator.create(RetiredLiveModule) catch {
-        _ = cleanupLoadPath(load_path, target_path);
-        return;
-    };
-    retired.* = .{
-        .library = library,
-        .target_path = allocator.dupe(u8, target_path) catch {
-            allocator.destroy(retired);
-            _ = cleanupLoadPath(load_path, target_path);
-            return;
-        },
-        .load_path = allocator.dupe(u8, load_path) catch {
-            allocator.free(retired.target_path);
-            allocator.destroy(retired);
-            _ = cleanupLoadPath(load_path, target_path);
-            return;
-        },
-    };
-
-    retired_live_modules.append(allocator, retired) catch {
-        // Keep the DLL mapped even if bookkeeping allocation fails.
-        _ = retired.cleanupLoadFile();
-        if (retired.target_path.len != 0) allocator.free(retired.target_path);
-        if (retired.load_path.len != 0) allocator.free(retired.load_path);
-        allocator.destroy(retired);
-        return;
-    };
-    _ = retired.cleanupLoadFile();
-}
-
-pub fn cleanupRetiredLoadPaths() usize {
-    var removed: usize = 0;
-    for (retired_live_modules.items) |retired| {
-        if (retired.cleanupLoadFile()) removed += 1;
-    }
-    return removed;
-}
-
-fn closeRetainedLiveModulesForReset() void {
-    for (retired_live_modules.items) |retired| {
-        retired.closeForReset();
-    }
-    retired_live_modules.deinit(std.heap.page_allocator);
-    retired_live_modules = .{};
-}
 
 fn cleanupStaleShadowCopies(allocator: std.mem.Allocator, target_path: []const u8) void {
     const dir_path = std.fs.path.dirname(target_path) orelse ".";
@@ -167,6 +93,8 @@ pub const CandidateModule = struct {
 };
 
 pub const LiveModuleState = struct {
+    id: u64,
+    status: GenerationStatus,
     target_path: []u8,
     load_path: []u8,
     loader_abi: u32,
@@ -175,8 +103,17 @@ pub const LiveModuleState = struct {
     cleanup: ?abi.CleanupFn,
     exports_by_name: std.StringHashMapUnmanaged(ExportState) = .{},
 
-    fn init(allocator: std.mem.Allocator, candidate: *CandidateModule) !LiveModuleState {
-        var live_state: LiveModuleState = .{
+    fn create(
+        allocator: std.mem.Allocator,
+        candidate: *CandidateModule,
+        id: u64,
+    ) !*LiveModuleState {
+        const live_state = try allocator.create(LiveModuleState);
+        errdefer allocator.destroy(live_state);
+
+        live_state.* = .{
+            .id = id,
+            .status = .active,
             .target_path = candidate.target_path,
             .load_path = candidate.load_path,
             .loader_abi = candidate.loader_abi,
@@ -213,17 +150,12 @@ pub const LiveModuleState = struct {
 
     fn deinit(self: *LiveModuleState, allocator: std.mem.Allocator, raw_env: ?*emacs.c.emacs_env) void {
         if (self.cleanup) |cleanup| cleanup(raw_env);
-        retainLiveModule(self.library, self.target_path, self.load_path);
-        self.library = null;
+        if (self.library) |*library| library.close();
+        _ = cleanupLoadPath(self.load_path, self.target_path);
         self.deinitExportsByName(allocator);
         allocator.free(self.target_path);
-        allocator.free(self.load_path);
-        self.library = null;
-        self.target_path = &[_]u8{};
-        self.load_path = &[_]u8{};
-        self.loader_abi = 0;
-        self.generic_manifest = std.mem.zeroes(abi.GenericManifest);
-        self.cleanup = null;
+        if (self.load_path.len != 0) allocator.free(self.load_path);
+        allocator.destroy(self);
     }
 
     fn deinitExportsByName(self: *LiveModuleState, allocator: std.mem.Allocator) void {
@@ -232,29 +164,53 @@ pub const LiveModuleState = struct {
         self.exports_by_name.deinit(allocator);
         self.exports_by_name = .{};
     }
+
+    fn cleanupLoadFile(self: *LiveModuleState, allocator: std.mem.Allocator) bool {
+        if (self.load_path.len == 0) return false;
+        if (!cleanupLoadPath(self.load_path, self.target_path)) return false;
+        allocator.free(self.load_path);
+        self.load_path = &[_]u8{};
+        return true;
+    }
 };
 
 pub const ModuleSlot = struct {
     allocator: std.mem.Allocator,
     module_id: []u8,
     manifest_path: []u8,
-    live_state: ?LiveModuleState = null,
+    live_state: ?*LiveModuleState = null,
+    retired_states: std.ArrayListUnmanaged(*LiveModuleState) = .{},
     bindings: std.ArrayListUnmanaged(*FunctionHandle) = .{},
 
     pub fn isLoaded(self: *const ModuleSlot) bool {
         return self.live_state != null;
     }
 
-    pub fn unload(self: *ModuleSlot, raw_env: ?*emacs.c.emacs_env) void {
-        if (self.live_state) |*live_state| {
-            live_state.deinit(self.allocator, raw_env);
+    pub fn unload(self: *ModuleSlot, _: ?*emacs.c.emacs_env) !void {
+        for (self.retired_states.items) |generation| {
+            generation.status = .disabled;
+        }
+
+        if (self.live_state) |live_state| {
+            try self.retired_states.append(self.allocator, live_state);
+            live_state.status = .disabled;
             self.live_state = null;
         }
     }
 
     fn replace(self: *ModuleSlot, candidate: *CandidateModule, raw_env: ?*emacs.c.emacs_env) !void {
-        const next_live_state = try LiveModuleState.init(self.allocator, candidate);
-        self.unload(raw_env);
+        _ = raw_env;
+        const next_live_state = try LiveModuleState.create(
+            self.allocator,
+            candidate,
+            nextGenerationId(),
+        );
+        errdefer next_live_state.deinit(self.allocator, null);
+
+        if (self.live_state) |live_state| {
+            try self.retired_states.append(self.allocator, live_state);
+            live_state.status = .retired;
+        }
         self.live_state = next_live_state;
 
         self.allocator.free(self.manifest_path);
@@ -262,8 +218,24 @@ pub const ModuleSlot = struct {
         candidate.manifest_path = &[_]u8{};
     }
 
+    pub fn generationById(self: *ModuleSlot, id: u64) ?*LiveModuleState {
+        if (self.live_state) |live_state| {
+            if (live_state.id == id) return live_state;
+        }
+        for (self.retired_states.items) |generation| {
+            if (generation.id == id) return generation;
+        }
+        return null;
+    }
+
     fn deinit(self: *ModuleSlot) void {
-        self.unload(null);
+        if (self.live_state) |live_state| {
+            live_state.deinit(self.allocator, null);
+        }
+        for (self.retired_states.items) |generation| {
+            generation.deinit(self.allocator, null);
+        }
+        self.retired_states.deinit(self.allocator);
         self.allocator.free(self.module_id);
         self.allocator.free(self.manifest_path);
         for (self.bindings.items) |binding| binding.deinit();
@@ -278,6 +250,69 @@ var module_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 // Tracks the allocator used to populate the registry collections so they
 // can be properly deinited (necessary when tests use std.testing.allocator).
 var registry_allocator: ?std.mem.Allocator = null;
+var next_generation_id: u64 = 1;
+
+fn nextGenerationId() u64 {
+    const id = next_generation_id;
+    next_generation_id += 1;
+    return id;
+}
+
+pub fn cleanupRetiredLoadPaths() usize {
+    var removed: usize = 0;
+    for (loaded_module_order.items) |module| {
+        for (module.retired_states.items) |generation| {
+            if (generation.cleanupLoadFile(module.allocator)) removed += 1;
+        }
+    }
+    return removed;
+}
+
+pub fn trackReturnedUserPointer(
+    env: emacs.Env,
+    object_generations: emacs.c.emacs_value,
+    value: emacs.c.emacs_value,
+    generation: *LiveModuleState,
+) void {
+    if (!env.isUserPtr(value)) return;
+    if (env.isNotNil(env.f("gethash", .{ value, object_generations }))) return;
+    _ = env.f(
+        "puthash",
+        .{ value, env.makeInteger(@intCast(generation.id)), object_generations },
+    );
+}
+
+pub const GenerationChoice = union(enum) {
+    current,
+    generation_id: u64,
+    conflict,
+};
+
+pub fn generationChoiceForArguments(
+    env: emacs.Env,
+    module: *ModuleSlot,
+    object_generations: emacs.c.emacs_value,
+    args: []const emacs.c.emacs_value,
+) GenerationChoice {
+    var selected_id: ?u64 = null;
+    for (args) |arg| {
+        if (!env.isUserPtr(arg)) continue;
+        const generation_value = env.f("gethash", .{ arg, object_generations });
+        if (!env.isNotNil(generation_value)) continue;
+        const generation_id: u64 = @intCast(env.extractInteger(generation_value));
+        if (module.generationById(generation_id) == null) continue;
+        if (selected_id) |id| {
+            if (id != generation_id) return .conflict;
+        } else {
+            selected_id = generation_id;
+        }
+    }
+
+    return if (selected_id) |id|
+        .{ .generation_id = id }
+    else
+        .current;
+}
 
 pub fn moduleAllocator() std.mem.Allocator {
     return module_arena.allocator();
@@ -378,7 +413,11 @@ pub fn installCandidate(candidate: *CandidateModule, raw_env: ?*emacs.c.emacs_en
     errdefer module.deinit();
     candidate.manifest_path = &[_]u8{};
 
-    module.live_state = try LiveModuleState.init(candidate.allocator, candidate);
+    module.live_state = try LiveModuleState.create(
+        candidate.allocator,
+        candidate,
+        nextGenerationId(),
+    );
 
     try loaded_modules.put(candidate.allocator, module.module_id, module);
     try loaded_module_order.append(candidate.allocator, module);
@@ -420,7 +459,6 @@ pub fn functionHandle(
 
 pub fn reset() void {
     for (loaded_module_order.items) |module| module.deinit();
-    closeRetainedLiveModulesForReset();
     if (registry_allocator) |alloc| {
         loaded_modules.deinit(alloc);
         loaded_module_order.deinit(alloc);
@@ -430,6 +468,7 @@ pub fn reset() void {
     loaded_modules = .{};
     loaded_module_order = .{};
     registry_allocator = null;
+    next_generation_id = 1;
 }
 
 fn testDynlibExtension() []const u8 {
@@ -570,6 +609,7 @@ test "installCandidate replaces existing module live state for reload" {
     };
     defer reset();
     const module = try installCandidate(&first, null);
+    const first_generation = module.live_state.?;
 
     var second = CandidateModule{
         .allocator = std.testing.allocator,
@@ -596,6 +636,9 @@ test "installCandidate replaces existing module live state for reload" {
     try std.testing.expectEqualStrings("fixtures/ghostel-module-next.json", reloaded.manifest_path);
     try std.testing.expectEqualStrings("fixtures/sample-module-next", reloaded.live_state.?.target_path);
     try std.testing.expectEqualStrings("1.1", std.mem.span(reloaded.live_state.?.generic_manifest.module_version));
+    try std.testing.expect(first_generation != reloaded.live_state.?);
+    try std.testing.expectEqual(GenerationStatus.retired, first_generation.status);
+    try std.testing.expectEqual(first_generation, module.generationById(first_generation.id).?);
 }
 
 var cleanup_test_events: std.ArrayListUnmanaged(u8) = .{};
@@ -623,7 +666,7 @@ test "candidate cleanup hook runs when discarded before install" {
     try std.testing.expectEqualStrings("c", cleanup_test_events.items);
 }
 
-test "module cleanup hook runs on unload and before replacement" {
+test "module cleanup hook is deferred while generations remain callable" {
     cleanup_test_events = .{};
     defer cleanup_test_events.deinit(std.testing.allocator);
 
@@ -657,7 +700,6 @@ test "module cleanup hook runs on unload and before replacement" {
         .load_path = try std.testing.allocator.dupe(u8, "fixtures/sample-module.load"),
         .loader_abi = 1,
     };
-    defer reset();
     const module = try installCandidate(&first, null);
 
     var second = CandidateModule{
@@ -680,10 +722,10 @@ test "module cleanup hook runs on unload and before replacement" {
         .loader_abi = 1,
     };
     _ = try installCandidate(&second, null);
-    try std.testing.expectEqualStrings("c", cleanup_test_events.items);
+    try std.testing.expectEqualStrings("", cleanup_test_events.items);
 
-    module.unload(null);
-    try std.testing.expectEqualStrings("c", cleanup_test_events.items);
+    try module.unload(null);
+    try std.testing.expectEqualStrings("", cleanup_test_events.items);
 
     var third = CandidateModule{
         .allocator = std.testing.allocator,
@@ -706,18 +748,11 @@ test "module cleanup hook runs on unload and before replacement" {
     };
     _ = try installCandidate(&third, null);
 
-    module.unload(null);
-    try std.testing.expectEqualStrings("cc", cleanup_test_events.items);
-}
+    try module.unload(null);
+    try std.testing.expectEqualStrings("", cleanup_test_events.items);
 
-test "live module unload retires library handles instead of closing them" {
-    const source = @embedFile("state.zig");
-    const live_start = std.mem.indexOf(u8, source, "pub const LiveModuleState = struct").?;
-    const live_end = std.mem.indexOfPos(u8, source, live_start, "pub const ModuleSlot = struct").?;
-    const live_source = source[live_start..live_end];
-    const old_live_close = "if (self.library) |*library| " ++ "library.close();";
-    try std.testing.expect(std.mem.indexOf(u8, live_source, old_live_close) == null);
-    try std.testing.expect(std.mem.indexOf(u8, live_source, "retainLiveModule(") != null);
+    reset();
+    try std.testing.expectEqualStrings("cc", cleanup_test_events.items);
 }
 
 fn testPathExists(path: []const u8) bool {
@@ -728,7 +763,7 @@ fn testPathExists(path: []const u8) bool {
     return true;
 }
 
-test "live module unload keeps retired handle and cleans unlocked shadow copy" {
+test "retired generation cleans an unlocked shadow copy without losing its manifest" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
     const allocator = std.testing.allocator;
@@ -742,7 +777,10 @@ test "live module unload keeps retired handle and cleans unlocked shadow copy" {
     try tmp_dir.dir.writeFile(.{ .sub_path = "sample-module.dll", .data = "target" });
     try tmp_dir.dir.writeFile(.{ .sub_path = ".sample-module.load.dll", .data = "shadow" });
 
-    var live_state = LiveModuleState{
+    const live_state = try allocator.create(LiveModuleState);
+    live_state.* = .{
+        .id = 1,
+        .status = .retired,
         .target_path = try allocator.dupe(u8, target_path),
         .load_path = try allocator.dupe(u8, load_path),
         .loader_abi = 1,
@@ -750,13 +788,14 @@ test "live module unload keeps retired handle and cleans unlocked shadow copy" {
         .generic_manifest = std.mem.zeroes(abi.GenericManifest),
         .cleanup = null,
     };
-    defer reset();
+
+    try std.testing.expect(live_state.cleanupLoadFile(allocator));
+
+    try std.testing.expect(!testPathExists(load_path));
+    try std.testing.expectEqual(@as(usize, 0), live_state.load_path.len);
+    try std.testing.expectEqual(@as(u32, 0), live_state.generic_manifest.exports_len);
 
     live_state.deinit(allocator, null);
-
-    try std.testing.expectEqual(@as(usize, 1), retired_live_modules.items.len);
-    try std.testing.expect(!testPathExists(load_path));
-    try std.testing.expectEqual(@as(usize, 0), retired_live_modules.items[0].load_path.len);
 }
 
 test "createShadowCopyPath removes stale unlocked load copies first" {
@@ -817,7 +856,7 @@ test "module slot unload preserves stable identity and manifest path" {
     const module = try installCandidate(&candidate, null);
     const binding = try functionHandle(module, "sample--ping", 0, 0);
 
-    module.unload(null);
+    try module.unload(null);
 
     try std.testing.expectEqual(module, moduleForId("sample-module").?);
     try std.testing.expectEqualStrings("sample-module", module.module_id);
@@ -861,7 +900,7 @@ test "installCandidate reuses an unloaded module slot" {
     defer reset();
 
     const module = try installCandidate(&first, null);
-    module.unload(null);
+    try module.unload(null);
 
     var second = CandidateModule{
         .allocator = std.testing.allocator,
